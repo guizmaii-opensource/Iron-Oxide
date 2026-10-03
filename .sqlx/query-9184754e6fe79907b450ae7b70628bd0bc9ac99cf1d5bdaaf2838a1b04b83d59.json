@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,\n                st.duration_s, st.warmup, st.completed_at\n         FROM workout_sets st\n         JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id\n         WHERE st.user_id = $1 AND st.exercise_id = ANY($2) AND s.status = 'completed'\n           AND (s.started_at, s.id) < ($3, $4::uuid)\n         ORDER BY s.started_at, s.id, st.completed_at, st.id",
+  "query": "SELECT id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,\n                completed_at, target_weight_ng, target_goal\n         FROM workout_sets WHERE session_id = $1 AND user_id = $2\n         ORDER BY completed_at, id",
   "describe": {
     "columns": [
       {
@@ -47,13 +47,21 @@
         "ordinal": 8,
         "name": "completed_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "target_weight_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "target_goal",
+        "type_info": "Jsonb"
       }
     ],
     "parameters": {
       "Left": [
         "Uuid",
-        "TextArray",
-        "Timestamptz",
         "Uuid"
       ]
     },
@@ -66,8 +74,10 @@
       true,
       true,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "7a45f7b55d1031587498e2f690095ce3787e0868faaeaeabfcbc4bf28f0a4a53"
+  "hash": "9184754e6fe79907b450ae7b70628bd0bc9ac99cf1d5bdaaf2838a1b04b83d59"
 }

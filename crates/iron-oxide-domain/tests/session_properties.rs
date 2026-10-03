@@ -42,6 +42,7 @@ prop_compose! {
             duration: duration.map(Seconds::new),
             warm_up,
             completed_at: START + offset,
+            target: None,
         }
     }
 }

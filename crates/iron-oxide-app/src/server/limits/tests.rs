@@ -285,6 +285,7 @@ fn the_default_body_limit_covers_every_server_function() {
         duration: None,
         warm_up: false,
         completed_at: Timestamp::from_epoch_millis(i64::MAX),
+        target: None,
     };
     let save_set = json!({ "session_id": SessionId::new_v7(), "set": set });
 

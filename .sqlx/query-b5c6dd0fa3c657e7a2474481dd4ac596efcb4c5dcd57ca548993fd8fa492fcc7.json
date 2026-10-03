@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workout_sets\n             (id, session_id, user_id, exercise_id, set_index, reps, weight_ng, duration_s,\n              warmup, completed_at, target_weight_ng, target_goal)\n         SELECT u.id, u.session_id, $1, u.exercise_id, u.set_index, u.reps, u.weight_ng,\n                u.duration_s, u.warmup, u.completed_at, u.target_weight_ng, u.target_goal\n         FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::int[], $6::int[], $7::bigint[],\n                     $8::bigint[], $9::bool[], $10::timestamptz[], $11::bigint[], $12::jsonb[])\n             AS u (id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,\n                   completed_at, target_weight_ng, target_goal)\n         ON CONFLICT (user_id, id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "TextArray",
+        "Int4Array",
+        "Int4Array",
+        "Int8Array",
+        "Int8Array",
+        "BoolArray",
+        "TimestamptzArray",
+        "Int8Array",
+        "JsonbArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b5c6dd0fa3c657e7a2474481dd4ac596efcb4c5dcd57ca548993fd8fa492fcc7"
+}

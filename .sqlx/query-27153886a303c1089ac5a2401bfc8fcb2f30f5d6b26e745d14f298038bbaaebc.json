@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,\n                st.duration_s, st.warmup, st.completed_at\n         FROM workout_sets st\n         JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id\n         JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id\n         WHERE st.user_id = $1 AND st.exercise_id = $3 AND st.completed_at > $4\n           AND s.status = 'completed' AND v.program_id = $2\n         ORDER BY st.completed_at, st.id",
+  "query": "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,\n                st.duration_s, st.warmup, st.completed_at, st.target_weight_ng, st.target_goal\n         FROM workout_sets st\n         JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id\n         JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id\n         WHERE st.user_id = $1 AND st.exercise_id = $3 AND st.completed_at > $4\n           AND s.status = 'completed' AND v.program_id = $2\n         ORDER BY st.completed_at, st.id",
   "describe": {
     "columns": [
       {
@@ -47,6 +47,16 @@
         "ordinal": 8,
         "name": "completed_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "target_weight_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "target_goal",
+        "type_info": "Jsonb"
       }
     ],
     "parameters": {
@@ -66,8 +76,10 @@
       true,
       true,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "482e2ab43566b4ff9eb38e760309081643f2b03cc68a2997eb810a702bae5b4b"
+  "hash": "27153886a303c1089ac5a2401bfc8fcb2f30f5d6b26e745d14f298038bbaaebc"
 }

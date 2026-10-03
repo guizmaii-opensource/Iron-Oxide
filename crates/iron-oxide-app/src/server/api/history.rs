@@ -152,6 +152,11 @@ fn logged_set(set: sets::LoggedSet) -> Result<LoggedSet<Timestamp>, ApiError> {
         duration: set.duration_s.map(Seconds::new),
         warm_up: set.warmup,
         completed_at: timestamp(set.completed_at)?,
+        target: set
+            .target
+            .as_ref()
+            .map(super::sessions::domain_target)
+            .transpose()?,
     })
 }
 
@@ -262,6 +267,7 @@ mod tests {
             duration_s: None,
             warmup,
             completed_at: time(i64::try_from(n).unwrap()),
+            target: None,
         }
     }
 

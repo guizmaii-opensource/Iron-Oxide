@@ -41,9 +41,17 @@ use {
 /// The `format` of every export: what tells an Iron Oxide export apart from any other JSON file.
 pub const EXPORT_FORMAT: &str = "iron-oxide-export";
 
-/// The version of the export format this server writes and reads. A change that an older reader
-/// would misread gets a new version; see `docs/export-format.md`.
-pub const EXPORT_FORMAT_VERSION: u32 = 1;
+/// The version of the export format this server writes. A change that an older reader would
+/// misread gets a new version; see `docs/export-format.md`.
+///
+/// - 1: #22.
+/// - 2: #60, each set may carry the `target` it was prescribed. An older reader would import a
+///   version 2 file without them, which changes how its training max sessions are judged.
+pub const EXPORT_FORMAT_VERSION: u32 = 2;
+
+/// The oldest version this server still imports. Version 1 is version 2 without set targets: its
+/// sets load as logged before #60.
+pub const OLDEST_IMPORTED_FORMAT_VERSION: u32 = 1;
 
 /// The largest export, in bytes of compact JSON. An account whose export would be larger gets a
 /// `413` from [`export_account_data`] (and support), so that every export this server writes can

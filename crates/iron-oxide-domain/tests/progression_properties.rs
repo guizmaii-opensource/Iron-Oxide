@@ -184,6 +184,7 @@ fn history() -> impl Strategy<Value = RawHistory> {
         reps: Reps::new(reps),
         weight,
         duration: None,
+        target: None,
     });
     proptest::collection::vec(
         (
@@ -216,19 +217,40 @@ fn counts(session: &PastSession) -> bool {
             .is_some_and(|prescription| matches!(prescription.work, Work::Reps { .. }))
 }
 
-/// Any valid step: up to [`ProgressionSettings::max_step`].
+/// The largest step before #60, in nanograms: 2.5 kg. Sets logged without a target are judged
+/// with a tolerance that only covers targets rounded to steps up to it.
+const LEGACY_MAX_STEP: u64 = 2_500_000_000_000;
+
+/// A step up to the legacy bound, for sets logged without a target.
 fn step() -> impl Strategy<Value = Weight> {
-    (1..=ProgressionSettings::max_step().as_nanograms())
-        .prop_map(|ng| Weight::from_nanograms(ng).unwrap())
+    (1..=LEGACY_MAX_STEP).prop_map(|ng| Weight::from_nanograms(ng).unwrap())
 }
 
+/// Any step a lifter could have, now that there is no bound (#60): up to 25 kg.
+fn any_step() -> impl Strategy<Value = Weight> {
+    (1..=10 * LEGACY_MAX_STEP).prop_map(|ng| Weight::from_nanograms(ng).unwrap())
+}
+
+/// Settings with steps up to the legacy bound.
 fn settings() -> impl Strategy<Value = ProgressionSettings> {
     prop_oneof![
         unit().prop_map(ProgressionSettings::for_unit),
         (unit(), step()).prop_map(|(unit, step)| ProgressionSettings::new(unit, step).unwrap()),
-        unit().prop_map(
-            |unit| ProgressionSettings::new(unit, ProgressionSettings::max_step()).unwrap()
-        ),
+        unit().prop_map(|unit| {
+            ProgressionSettings::new(unit, Weight::from_nanograms(LEGACY_MAX_STEP).unwrap())
+                .unwrap()
+        }),
+    ]
+}
+
+/// Settings with any step, 5 kg (2.5 kg plates) included.
+fn any_settings() -> impl Strategy<Value = ProgressionSettings> {
+    prop_oneof![
+        settings(),
+        (unit(), any_step()).prop_map(|(unit, step)| ProgressionSettings::new(unit, step).unwrap()),
+        unit().prop_map(|unit| {
+            ProgressionSettings::new(unit, Weight::from_kg(5.0).unwrap()).unwrap()
+        }),
     ]
 }
 
@@ -385,8 +407,8 @@ proptest! {
     fn replay_does_not_depend_on_the_settings(
         exercise in exercise(),
         training_max in weight(),
-        first in settings(),
-        second in settings(),
+        first in any_settings(),
+        second in any_settings(),
         raw in history(),
     ) {
         let history = resolve(&exercise, &raw);
@@ -422,6 +444,37 @@ proptest! {
             let after = ready(next_targets(&exercise, Some(training_max), settings, &history));
             prop_assert_eq!(after.last_verdict, Some(SessionVerdict::Success));
             prop_assert_eq!(after.failed_sessions, 0);
+        }
+    }
+
+    /// Doing exactly what was shown, with each set logged with its target (#60), is a success
+    /// session after session, for every rule and **any** step, 5 kg and up included: the verdict
+    /// compares with the target stored with each set, not with a tolerance.
+    #[test]
+    fn doing_the_prescription_logged_with_its_targets_is_a_success_with_any_step(
+        exercise in exercise(),
+        training_max in weight(),
+        settings in any_settings(),
+        later in any_settings(),
+        sessions in 1_usize..=5,
+    ) {
+        let mut history = Vec::new();
+        for _ in 0..sessions {
+            let target = ready(next_targets(&exercise, Some(training_max), settings, &history));
+            let Work::Reps { reps, .. } = exercise.work else { unreachable!() };
+            let sets = target
+                .working
+                .iter()
+                .map(|set| WorkingSet::new(set.weight.unwrap(), reps.max()).prescribed(*set))
+                .collect();
+            history.push(PastSession::in_order(Prescription::of(&exercise), sets));
+            let after = ready(next_targets(&exercise, Some(training_max), settings, &history));
+            prop_assert_eq!(after.last_verdict, Some(SessionVerdict::Success));
+            prop_assert_eq!(after.failed_sessions, 0);
+            // And it stays so whatever the settings become.
+            let changed = ready(next_targets(&exercise, Some(training_max), later, &history));
+            prop_assert_eq!(changed.last_verdict, after.last_verdict);
+            prop_assert_eq!(changed.training_max, after.training_max);
         }
     }
 
@@ -579,8 +632,12 @@ fn chain_settings() -> Vec<ProgressionSettings> {
         ProgressionSettings::new(Unit::Kg, kg(0.25)).unwrap(),
         ProgressionSettings::new(Unit::Lb, lb(2.5)).unwrap(),
         ProgressionSettings::new(Unit::Lb, lb(5.5)).unwrap(),
-        ProgressionSettings::new(Unit::Kg, ProgressionSettings::max_step()).unwrap(),
+        ProgressionSettings::new(Unit::Kg, kg(2.5)).unwrap(),
         ProgressionSettings::new(Unit::Kg, Weight::from_nanograms(1).unwrap()).unwrap(),
+        // Above the legacy bound (#60): every set is logged with its target below.
+        ProgressionSettings::new(Unit::Kg, kg(5.0)).unwrap(),
+        ProgressionSettings::new(Unit::Lb, lb(10.0)).unwrap(),
+        ProgressionSettings::new(Unit::Kg, kg(20.0)).unwrap(),
     ]
 }
 
@@ -595,7 +652,7 @@ proptest! {
     fn chains_across_versions_done_as_shown(
         versions in (0_u8..3).prop_flat_map(versions),
         training_max in weight(),
-        steps in proptest::collection::vec((0_usize..3, 0_usize..2, 0_usize..9, act()), 1..=8),
+        steps in proptest::collection::vec((0_usize..3, 0_usize..2, 0_usize..12, act()), 1..=8),
     ) {
         let all = chain_settings();
         let tm = Some(training_max);
@@ -613,7 +670,7 @@ proptest! {
                         (Act::Goal, SetGoal::Reps { reps, .. }) => reps,
                         _ => target.max(),
                     };
-                    WorkingSet::new(set.weight.unwrap(), reps)
+                    WorkingSet::new(set.weight.unwrap(), reps).prescribed(*set)
                 })
                 .collect();
             match act {

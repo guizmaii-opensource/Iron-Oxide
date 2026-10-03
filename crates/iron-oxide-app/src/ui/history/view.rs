@@ -584,6 +584,7 @@ mod tests {
             duration: duration.map(Seconds::new),
             warm_up,
             completed_at: ts(0),
+            target: None,
         }
     }
 

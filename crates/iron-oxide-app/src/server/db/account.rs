@@ -278,6 +278,10 @@ pub struct Set {
     pub duration_s: Option<i64>,
     pub warmup: bool,
     pub completed_at: OffsetDateTime,
+    /// The prescribed target's load (#60); `None` for a body-weight target or no target.
+    pub target_weight_ng: Option<i64>,
+    /// The prescribed target's `SetGoal` JSON (#60); `None` when no target was recorded.
+    pub target_goal: Option<JsonValue>,
 }
 
 /// The user's sets, by session and in the order they were completed.
@@ -285,7 +289,7 @@ pub async fn sets(tx: &mut PgConnection, user: UserId) -> Result<Vec<Set>, RepoE
     Ok(sqlx::query_as!(
         Set,
         "SELECT session_id, id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,
-                completed_at
+                completed_at, target_weight_ng, target_goal
          FROM workout_sets WHERE user_id = $1
          ORDER BY session_id, completed_at, id",
         user.as_uuid()
@@ -582,16 +586,18 @@ pub async fn insert_sets(
     let durations: Vec<Option<i64>> = sets.iter().map(|s| s.duration_s).collect();
     let warmups: Vec<bool> = sets.iter().map(|s| s.warmup).collect();
     let completed: Vec<OffsetDateTime> = sets.iter().map(|s| s.completed_at).collect();
+    let target_weights: Vec<Option<i64>> = sets.iter().map(|s| s.target_weight_ng).collect();
+    let target_goals: Vec<Option<JsonValue>> = sets.iter().map(|s| s.target_goal.clone()).collect();
     Ok(sqlx::query!(
         "INSERT INTO workout_sets
              (id, session_id, user_id, exercise_id, set_index, reps, weight_ng, duration_s,
-              warmup, completed_at)
+              warmup, completed_at, target_weight_ng, target_goal)
          SELECT u.id, u.session_id, $1, u.exercise_id, u.set_index, u.reps, u.weight_ng,
-                u.duration_s, u.warmup, u.completed_at
+                u.duration_s, u.warmup, u.completed_at, u.target_weight_ng, u.target_goal
          FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::int[], $6::int[], $7::bigint[],
-                     $8::bigint[], $9::bool[], $10::timestamptz[])
+                     $8::bigint[], $9::bool[], $10::timestamptz[], $11::bigint[], $12::jsonb[])
              AS u (id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,
-                   completed_at)
+                   completed_at, target_weight_ng, target_goal)
          ON CONFLICT (user_id, id) DO NOTHING",
         user.as_uuid(),
         &ids,
@@ -603,6 +609,8 @@ pub async fn insert_sets(
         &durations as &[Option<i64>],
         &warmups,
         &completed,
+        &target_weights as &[Option<i64>],
+        &target_goals as &[Option<JsonValue>],
     )
     .execute(tx)
     .await?

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::SetTarget;
 use crate::program::{Exercise, Load, Program, ProgressionRule, Work};
 use crate::session::{LoggedSet, Session, SessionLog, SessionStatus};
 use crate::{DayId, ExerciseId, Reps, Seconds, Weight};
@@ -19,6 +20,10 @@ pub struct WorkingSet {
     pub weight: Option<Weight>,
     /// Time of a timed set, or `None`.
     pub duration: Option<Seconds>,
+    /// What the app prescribed for this set when it was logged ([`LoggedSet::target`]), or `None`
+    /// for a set logged without one (before #60). A training max session's set is judged against
+    /// it exactly when it is there.
+    pub target: Option<SetTarget>,
 }
 
 impl WorkingSet {
@@ -31,6 +36,7 @@ impl WorkingSet {
             reps,
             weight: Some(weight),
             duration: None,
+            target: None,
         }
     }
 
@@ -42,6 +48,7 @@ impl WorkingSet {
             reps,
             weight: None,
             duration: None,
+            target: None,
         }
     }
 
@@ -49,6 +56,15 @@ impl WorkingSet {
     #[must_use]
     pub const fn at(self, set_index: u16) -> Self {
         Self { set_index, ..self }
+    }
+
+    /// The same set, logged with `target` as what was prescribed.
+    #[must_use]
+    pub const fn prescribed(self, target: SetTarget) -> Self {
+        Self {
+            target: Some(target),
+            ..self
+        }
     }
 }
 
@@ -59,6 +75,7 @@ impl<T> From<&LoggedSet<T>> for WorkingSet {
             reps: set.reps,
             weight: set.weight,
             duration: set.duration,
+            target: set.target,
         }
     }
 }
@@ -243,6 +260,7 @@ mod tests {
             duration: None,
             warm_up,
             completed_at: 10,
+            target: None,
         }
     }
 
@@ -291,7 +309,8 @@ mod tests {
                 set_index: 0,
                 reps: Reps::new(5),
                 weight: Some(weight),
-                duration: None
+                duration: None,
+                target: None,
             }
         );
         assert_eq!(WorkingSet::bodyweight(Reps::new(12)).weight, None);

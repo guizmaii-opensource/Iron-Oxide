@@ -660,6 +660,7 @@ pub(crate) mod tests {
                 duration: None,
                 warm_up: false,
                 completed_at: at(2_000 + i64::from(index)),
+                target: None,
             },
         }
     }

@@ -6,7 +6,7 @@
 
 use sqlx::{
     PgPool,
-    types::{Uuid, time::OffsetDateTime},
+    types::{JsonValue, Uuid, time::OffsetDateTime},
 };
 
 use super::{
@@ -32,6 +32,18 @@ pub struct LoggedSet {
     pub duration_s: Option<u32>,
     pub warmup: bool,
     pub completed_at: OffsetDateTime,
+    /// What the app prescribed for the set when it was logged (#60), or `None` when no target was
+    /// recorded (sets logged before #60, extras).
+    pub target: Option<Target>,
+}
+
+/// A set's prescribed target (the domain `SetTarget`), as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// The target load in nanograms (the domain `Weight`), `None` for a body-weight target.
+    pub weight_ng: Option<u64>,
+    /// The domain `SetGoal` JSON (an object). Validate it with the domain before saving.
+    pub goal: JsonValue,
 }
 
 /// A `workout_sets` row.
@@ -45,6 +57,8 @@ struct SetRow {
     duration_s: Option<i64>,
     warmup: bool,
     completed_at: OffsetDateTime,
+    target_weight_ng: Option<i64>,
+    target_goal: Option<JsonValue>,
 }
 
 impl TryFrom<SetRow> for LoggedSet {
@@ -67,8 +81,38 @@ impl TryFrom<SetRow> for LoggedSet {
                 .transpose()?,
             warmup: row.warmup,
             completed_at: row.completed_at,
+            target: row
+                .target_goal
+                .map(|goal| {
+                    Ok::<_, RepoError>(Target {
+                        weight_ng: row
+                            .target_weight_ng
+                            .map(|weight| narrow(weight, "workout_sets.target_weight_ng"))
+                            .transpose()?,
+                        goal,
+                    })
+                })
+                .transpose()?,
         })
     }
+}
+
+/// The target columns of a set: `(target_weight_ng, target_goal)`, both `None` without a target.
+pub(super) fn target_columns(
+    target: Option<&Target>,
+) -> Result<(Option<i64>, Option<JsonValue>), RepoError> {
+    let Some(target) = target else {
+        return Ok((None, None));
+    };
+    let weight = target
+        .weight_ng
+        .map(|weight| {
+            i64::try_from(weight).map_err(|_| RepoError::Invalid {
+                constraint: Some("workout_sets_target_weight_ng_check".to_owned()),
+            })
+        })
+        .transpose()?;
+    Ok((weight, Some(target.goal.clone())))
 }
 
 /// Saves a set in one of the user's in-progress sessions. Idempotent on the set id.
@@ -99,10 +143,11 @@ pub async fn upsert_idempotent(
         })
         .transpose()?;
     let duration_s = set.duration_s.map(i64::from);
+    let target = target_columns(set.target.as_ref())?;
     // A second attempt covers a save that races its session's start: the insert's snapshot did
     // not see the session yet, the status read afterwards does. The next insert sees it too.
     for _ in 0..2 {
-        match save_once(pool, user, set, weight_ng, duration_s).await? {
+        match save_once(pool, user, set, weight_ng, duration_s, &target).await? {
             Attempt::Done(change) => return Ok(change),
             Attempt::SessionAppeared => {}
         }
@@ -124,14 +169,15 @@ async fn save_once(
     set: &LoggedSet,
     weight_ng: Option<i64>,
     duration_s: Option<i64>,
+    (target_weight_ng, target_goal): &(Option<i64>, Option<JsonValue>),
 ) -> Result<Attempt, RepoError> {
     // Inserts only into a session of this user that is still in progress. Ids are unique per user
     // (primary key `(user_id, id)`), so only this user's own set with this id inserts nothing.
     let inserted = sqlx::query!(
         "INSERT INTO workout_sets
              (id, session_id, user_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,
-              completed_at)
-         SELECT $1, s.id, s.user_id, $4, $5, $6, $7, $8, $9, $10
+              completed_at, target_weight_ng, target_goal)
+         SELECT $1, s.id, s.user_id, $4, $5, $6, $7, $8, $9, $10, $11, $12
          FROM workout_sessions s
          WHERE s.id = $2 AND s.user_id = $3 AND s.status = 'in_progress'
          ON CONFLICT (user_id, id) DO NOTHING",
@@ -145,6 +191,8 @@ async fn save_once(
         duration_s,
         set.warmup,
         set.completed_at,
+        *target_weight_ng,
+        target_goal.as_ref(),
     )
     .execute(pool)
     .await?
@@ -159,7 +207,9 @@ async fn save_once(
     let same = sqlx::query_scalar!(
         r#"SELECT (session_id = $3 AND exercise_id = $4 AND set_index = $5 AND reps = $6
                    AND weight_ng IS NOT DISTINCT FROM $7 AND duration_s IS NOT DISTINCT FROM $8
-                   AND warmup = $9 AND completed_at = $10) AS "same!"
+                   AND warmup = $9 AND completed_at = $10
+                   AND target_weight_ng IS NOT DISTINCT FROM $11
+                   AND target_goal IS NOT DISTINCT FROM $12) AS "same!"
            FROM workout_sets WHERE id = $1 AND user_id = $2"#,
         set.id.as_uuid(),
         user.as_uuid(),
@@ -171,6 +221,8 @@ async fn save_once(
         duration_s,
         set.warmup,
         set.completed_at,
+        *target_weight_ng,
+        target_goal.as_ref(),
     )
     .fetch_optional(pool)
     .await?;
@@ -218,7 +270,7 @@ pub async fn list_for_session(
     let sets = sqlx::query_as!(
         SetRow,
         "SELECT id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,
-                completed_at
+                completed_at, target_weight_ng, target_goal
          FROM workout_sets WHERE session_id = $1 AND user_id = $2
          ORDER BY completed_at, id",
         session.as_uuid(),
@@ -250,7 +302,7 @@ pub async fn completed_for_exercise(
     sqlx::query_as!(
         SetRow,
         "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,
-                st.duration_s, st.warmup, st.completed_at
+                st.duration_s, st.warmup, st.completed_at, st.target_weight_ng, st.target_goal
          FROM workout_sets st
          JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id
          JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id
@@ -281,7 +333,7 @@ pub async fn completed_in_program(
     sqlx::query_as!(
         SetRow,
         "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,
-                st.duration_s, st.warmup, st.completed_at
+                st.duration_s, st.warmup, st.completed_at, st.target_weight_ng, st.target_goal
          FROM workout_sets st
          JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id
          JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id
@@ -310,7 +362,7 @@ pub async fn completed_for_exercises_before(
     sqlx::query_as!(
         SetRow,
         "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,
-                st.duration_s, st.warmup, st.completed_at
+                st.duration_s, st.warmup, st.completed_at, st.target_weight_ng, st.target_goal
          FROM workout_sets st
          JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id
          WHERE st.user_id = $1 AND st.exercise_id = ANY($2) AND s.status = 'completed'

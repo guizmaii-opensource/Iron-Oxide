@@ -230,6 +230,7 @@ mod tests {
             duration: None,
             warm_up: false,
             completed_at,
+            target: None,
         }
     }
 

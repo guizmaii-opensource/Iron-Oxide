@@ -35,7 +35,7 @@ use crate::api::{
     account::{
         EXPORT_FORMAT, EXPORT_FORMAT_VERSION, ExportAccount, ExportDocument, ExportLinkedAccount,
         ExportPasskey, ExportProgram, ExportSession, ExportSettings, ExportSignIn, ExportVersion,
-        IMPORT_BODY_LIMIT, ImportSummary, MAX_EXPORT_BYTES,
+        IMPORT_BODY_LIMIT, ImportSummary, MAX_EXPORT_BYTES, OLDEST_IMPORTED_FORMAT_VERSION,
     },
     programs::{ProgramProblem, ProgramProblems},
     settings::{SettingsUpdate, TrainingMax},
@@ -253,6 +253,16 @@ fn export_set(set: repo::Set) -> Result<LoggedSet<Timestamp>, ApiError> {
             .transpose()?,
         warm_up: set.warmup,
         completed_at: timestamp(set.completed_at)?,
+        target: set
+            .target_goal
+            .map(|goal| {
+                let weight_ng = set
+                    .target_weight_ng
+                    .map(|ng| stored(u64::try_from(ng), "workout_sets.target_weight_ng"))
+                    .transpose()?;
+                super::sessions::domain_target(&db::sets::Target { weight_ng, goal })
+            })
+            .transpose()?,
     })
 }
 
@@ -443,11 +453,15 @@ impl Import {
             .as_ref()
             .and_then(serde_json::Value::as_u64)
         {
-            Some(version) if version == u64::from(EXPORT_FORMAT_VERSION) => {}
+            Some(version)
+                if (u64::from(OLDEST_IMPORTED_FORMAT_VERSION)
+                    ..=u64::from(EXPORT_FORMAT_VERSION))
+                    .contains(&version) => {}
             Some(version) => {
                 return Err(ApiError::invalid(format!(
                     "This export has format version {version}, which this version of Iron Oxide \
-                     cannot read (it reads version {EXPORT_FORMAT_VERSION})."
+                     cannot read (it reads versions {OLDEST_IMPORTED_FORMAT_VERSION} to \
+                     {EXPORT_FORMAT_VERSION})."
                 )));
             }
             None => {
@@ -642,6 +656,12 @@ impl Import {
                         completed_at: time(set.completed_at, || {
                             format!("sessions[{i}].sets[{j}].completed_at")
                         })?,
+                        target_weight_ng: set.target.and_then(|t| t.weight).map(nanograms),
+                        target_goal: set
+                            .target
+                            .map(|target| serde_json::to_value(target.goal))
+                            .transpose()
+                            .map_err(ApiError::internal)?,
                     })
                 })
                 .collect::<Result<_, _>>()?;

@@ -184,6 +184,7 @@ mod tests {
             duration: duration.map(crate::Seconds::new),
             warm_up,
             completed_at: 0,
+            target: None,
         }
     }
 
