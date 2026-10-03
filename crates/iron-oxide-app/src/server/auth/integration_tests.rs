@@ -229,6 +229,158 @@ async fn a_sign_up_ceremony_is_single_use(db: PgPool) {
     assert_eq!(users, 1);
 }
 
+// --- A retryable failure leaves the ceremony usable (#104) ---------------------------------
+
+/// Makes every `operation` (`INSERT`, `UPDATE`) on `table` fail with a serialization failure
+/// (`40001`, a retryable `503`) until [`heal`].
+async fn fail_transiently(db: &PgPool, operation: &str, table: &str) {
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION test_fail_transiently() RETURNS trigger LANGUAGE plpgsql AS
+         $$ BEGIN RAISE EXCEPTION 'injected' USING ERRCODE = '40001'; END $$",
+    )
+    .execute(db)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER test_fail_transiently BEFORE {operation} ON {table}
+         FOR EACH ROW EXECUTE FUNCTION test_fail_transiently()"
+    ))
+    .execute(db)
+    .await
+    .unwrap();
+}
+
+async fn heal(db: &PgPool, table: &str) {
+    sqlx::query(&format!("DROP TRIGGER test_fail_transiently ON {table}"))
+        .execute(db)
+        .await
+        .unwrap();
+}
+
+async fn count(db: &PgPool, table: &str) -> i64 {
+    sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+        .fetch_one(db)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn a_503_sign_up_finish_can_be_replayed(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut browser = app.browser();
+    let mut passkey = Passkey::new();
+    let ccr: CreationChallengeResponse = browser
+        .call(SIGN_UP_BEGIN, json!({ "display_name": "a" }))
+        .await
+        .unwrap();
+    let body = json!({ "credential": passkey.register(ccr) });
+
+    fail_transiently(&db, "INSERT", "users").await;
+    let error = browser
+        .call::<Me>(SIGN_UP_FINISH, body.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE, "{error:?}");
+    assert_eq!(count(&db, "users").await, 0);
+    assert_eq!(count(&db, "auth_ceremonies").await, 1, "rolled back");
+
+    heal(&db, "users").await;
+    let me1: Me = browser.call(SIGN_UP_FINISH, body.clone()).await.unwrap();
+    assert_eq!(me(&mut browser).await.unwrap(), me1);
+    assert_eq!(count(&db, "auth_ceremonies").await, 0);
+    // Still single use.
+    assert_eq!(
+        browser
+            .call::<Me>(SIGN_UP_FINISH, body)
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn a_503_sign_in_finish_can_be_replayed(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut browser = app.browser();
+    let mut passkey = Passkey::new();
+    let (me1, credential_id) = sign_up(&mut browser, &mut passkey, "a").await;
+    let () = browser.call(SIGN_OUT, json!({})).await.unwrap();
+    let assertion = sign_in_assertion(&mut browser, &mut passkey, &credential_id).await;
+    let body = json!({ "credential": assertion });
+
+    fail_transiently(&db, "UPDATE", "passkeys").await;
+    let error = browser
+        .call::<Me>(SIGN_IN_FINISH, body.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE, "{error:?}");
+    assert_eq!(
+        me(&mut browser).await.unwrap_err().status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    heal(&db, "passkeys").await;
+    let me2: Me = browser.call(SIGN_IN_FINISH, body).await.unwrap();
+    assert_eq!(me2.user_id, me1.user_id);
+    assert!(me2.passkeys[0].last_used_at.is_some());
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn a_503_add_passkey_finish_can_be_replayed(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut browser = app.browser();
+    sign_up(&mut browser, &mut Passkey::new(), "a").await;
+    let ccr: CreationChallengeResponse = browser.call(ADD_BEGIN, json!({})).await.unwrap();
+    let body = json!({ "credential": Passkey::new().register(ccr), "nickname": "Laptop" });
+
+    fail_transiently(&db, "INSERT", "passkeys").await;
+    let error = browser
+        .call::<Me>(ADD_FINISH, body.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE, "{error:?}");
+
+    heal(&db, "passkeys").await;
+    let me2: Me = browser.call(ADD_FINISH, body).await.unwrap();
+    assert_eq!(me2.passkeys.len(), 2);
+    assert_eq!(me2.passkeys[1].nickname, "Laptop");
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn a_failed_verification_still_uses_up_the_ceremony(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let (mut mine, mut other) = (app.browser(), app.browser());
+    let mut passkey = Passkey::new();
+    let ccr: CreationChallengeResponse = mine
+        .call(SIGN_UP_BEGIN, json!({ "display_name": "a" }))
+        .await
+        .unwrap();
+    let own = passkey.register(ccr);
+    let ccr: CreationChallengeResponse = other
+        .call(SIGN_UP_BEGIN, json!({ "display_name": "b" }))
+        .await
+        .unwrap();
+    let foreign = Passkey::new().register(ccr);
+
+    // Signed over another challenge: refused, and the ceremony is gone with it.
+    let error = mine
+        .call::<Me>(SIGN_UP_FINISH, json!({ "credential": foreign }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    let error = mine
+        .call::<Me>(SIGN_UP_FINISH, json!({ "credential": own }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(count(&db, "users").await, 0);
+}
+
 #[sqlx::test]
 #[ignore = "needs Postgres"]
 async fn an_expired_ceremony_is_rejected(db: PgPool) {

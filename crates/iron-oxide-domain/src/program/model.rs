@@ -16,7 +16,7 @@ use crate::{DayId, ExerciseId, Percent, Reps, Seconds};
 #[serde(deny_unknown_fields)]
 pub struct Program {
     /// Optional link to this JSON Schema, so editors can check and complete the document. Only
-    /// the published URL is accepted.
+    /// the published URL is accepted (or the one from before the repository moved).
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<SchemaUrl>,
     /// The version of the document format. Must be 1.

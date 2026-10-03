@@ -23,6 +23,7 @@ The dark ground `#121416` is also in `public/manifest.webmanifest` (`theme_color
 | `--io-surface-edge` | `#1b1e22` | `#e2dcd2` | Card border (invisible in dark) |
 | `--io-raised` | `#2a2f35` | `#ece7df` | Secondary buttons, the stepper's minus |
 | `--io-chip` | `#24282d` | `#e6e1d8` | Chips |
+| `--io-chip-ring` | `#e8703a` | `#17191c` | Selected chip ring (light only: in dark it is the fill) |
 | `--io-track` | `#3a3f46` | `#d6d0c6` | Empty progress segments |
 | `--io-track-soft` | `#2a2f35` | `#ddd7cd` | Empty progress bars |
 | `--io-line` | `#2e3339` | `#d3ccc1` | Decorative borders |
@@ -59,6 +60,10 @@ tests in `src/ui/theme.rs` read the stylesheet and fail below these thresholds.
 Rules:
 
 - Never use `--io-accent` as text: on the light ground it is 2.6:1. Use `--io-accent-text`.
+- A selected chip is not told by its fill alone in the light theme: the accent against the light
+  chip is 2.4:1. It also gets a 2 px inset ring (`--io-chip-ring`, `#17191c`), at least 3:1
+  against the chip, the ground and the surface. In dark the fill is already over 3:1 and the
+  ring token is the fill's colour, so no ring shows.
 - The accent progress segments against the light track are below 3:1; progress is always also
   given as text ("SET 2 / 5") and through `aria-valuenow`.
 

@@ -24,7 +24,7 @@ use super::values::{
     DemoUrl, Load, LoadRepr, RepRange, RepTarget, SchemaUrl, Tempo, UnitWeight, UnitWeightRepr,
     WarmupLoad, WarmupLoadRepr, is_host_char, is_url_char,
 };
-use super::{CURRENT_SCHEMA_VERSION, PROGRAM_SCHEMA_URL, Program};
+use super::{CURRENT_SCHEMA_VERSION, LEGACY_PROGRAM_SCHEMA_URL, PROGRAM_SCHEMA_URL, Program};
 use crate::{DayId, ExerciseId, Percent, Reps, Seconds};
 
 /// Matches the slug rules of `ExerciseId`, `DayId` and `SupersetId`.
@@ -261,8 +261,9 @@ manual_schema!(DemoUrl, "DemoUrl", inline = false, |_g| json_schema!({
     "pattern": demo_url_pattern(),
     "maxLength": DemoUrl::MAX_LEN,
 }));
+// The legacy URL is accepted (documents saved before the repository moved), never written.
 manual_schema!(SchemaUrl, "SchemaUrl", inline = true, |_g| json_schema!({
-    "const": PROGRAM_SCHEMA_URL,
+    "enum": [PROGRAM_SCHEMA_URL, LEGACY_PROGRAM_SCHEMA_URL],
 }));
 manual_schema!(UnitWeight, "UnitWeight", inline = false, |g| {
     UnitWeightRepr::json_schema(g)
