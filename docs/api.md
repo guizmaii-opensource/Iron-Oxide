@@ -121,8 +121,12 @@ status.
 **Arguments that do not decode** are `422 Invalid request.` They include a malformed id, a wrong
 type or a missing field. Dioxus answers them with a `500` whose text is a serde error.
 
-**Every 5xx except 503** gets the generic message and no details, whatever the function put in
-it (`ServerFnError::new(detail)`, an `anyhow` error). The original text is logged.
+**Every 5xx** gets a fixed message and no details, whatever the function put in it
+(`ServerFnError::new(detail)`, an `anyhow` error, a `{"message", "data"}` body from another
+layer): `503` gets `The server is busy. Please try again.`, every other 5xx the generic message.
+The only detail kept is a 503's `retry_after_secs` (a whole number from 1 to 3600, as the busy
+account import and deletion send), which also becomes the `Retry-After` header. The original text
+is logged.
 
 **429 (rate limiting, #72).** The body is
 
@@ -264,6 +268,18 @@ Rules:
     skipped working set leaves a gap.
   - The exercise does not have to be on the session's day, so an added exercise is fine. Only the
     day's exercises get targets and progression.
+  - **`target` (#60, optional).** The `SetTarget` the session screen showed for the set (its
+    prefill: weight and reps, hold or intervals), saved with it and returned by every read of the
+    set. It is part of the set's content, so the same id with another target is `409`. The
+    progression judges a training max session's set against its target exactly (lifted at least
+    the target's weight); a set without one (logged before #60, an extra, an added exercise) is
+    judged with the legacy 1.25 kg tolerance, and so is a set whose target has no weight (never a
+    training max prescription). The session screen sends a target only when it is a real
+    prescription: none for the empty bar it offers when the plan needs a training max the lifter
+    has not entered, or a training max entered while the workout is open would judge those sets
+    against the bar. The server checks the target's types, not its values (a target lighter than
+    the bar is fine: dumbbells, kettlebells): it is what the client says it showed, and it only
+    ever moves the sender's own progression.
 - **Finishing.** The domain's `SessionLog::end` checks the time: not before the start or before a
   logged set (`422`). A retry with the same outcome and time returns the same summary. Another
   outcome or time is `409`. The summary is computed from stored data up to and including the
@@ -344,10 +360,16 @@ Epley formula.
 
 | Path | Arguments | Result |
 |---|---|---|
-| `/api/history/page` | `cursor: Option<HistoryCursor>`, `limit: Option<u32>` (default 20, 1 to 100) | `HistoryPage { sessions, next }`: ended sessions, most recently finished first (ties by id, descending). `next` is `None` on the last page. |
-| `/api/history/session` | `session_id` | `SessionDetails`: the session (ended or still in progress) and its sets grouped by exercise (in the order each was first logged), with each exercise's top set, best e1RM and volume. |
-| `/api/history/exercise-series` | `exercise_id` (a slug) | `ExerciseSeries`: one point per ended session with a weighted working set, oldest first: the top set and the best e1RM. |
+| `/api/history/page` | `cursor: Option<HistoryCursor>`, `limit: Option<u32>` (default 20, 1 to 100) | `HistoryPage { sessions, next }`: ended sessions, most recently finished first (ties by id, descending). `next` is `None` on the last page. Each `SessionSummary` carries `day_name` (from the session's own program version), `volume` (working sets, as the end-of-session summary counts it) and `set_pr` (see below). |
+| `/api/history/session` | `session_id` | `SessionDetails`: the session (ended or still in progress) and its sets grouped by exercise (in the order each was first logged), with each exercise's top set, best e1RM and volume. The session's `day_name`, `volume` and `set_pr` are the list's. |
+| `/api/history/exercise-series` | `exercise_id` (a slug) | `ExerciseSeries`: one `ExercisePoint` per ended session with a weighted working set, oldest first: the top set, the best e1RM and the exercise's volume in that session. Timed sets (holds) are left out. |
 | `/api/history/exercises` | none | The exercises logged in ended sessions, most recently trained first, with the number of sessions. |
+
+**PR flags.** `set_pr` is true exactly when the session's end-of-session summary reports a personal
+record: only completed sessions, against the sets of the user's completed sessions started before it
+(`ExerciseRecords`, Epley). A page costs three queries whatever its size: the page, its sets
+(`sets::list_for_sessions`), and the record history of the exercises it logged up to its latest
+completed session (`sets::completed_for_exercises_before`), replayed in order.
 
 - **Cursor.** `HistoryCursor` is opaque to the client: pass back the `next` of the previous page.
   It holds the last session's `finished_at` in **microseconds** (the database's precision) and its
@@ -362,11 +384,20 @@ Epley formula.
 - Errors: `422` for a page size out of range, a bad cursor or an exercise id that is not a slug;
   `404` for a session that is not the user's.
 
+### Account (`src/auth/api.rs`, #103)
+
+Sign-in keeps its own module and `AuthError` (see [Layout](#layout)); these two complete it.
+
+| Path | Arguments | Result |
+|---|---|---|
+| `/api/auth/rename` | `display_name` | The renamed `Me`. Trimmed; blank, longer than 64 characters or with a control character is `400` with the reason. |
+| `/api/auth/sign-out-everywhere` | none | Nothing. Deletes every session of the user, this one included, and clears this device's cookie: every device is signed out. |
+
 ### Settings (`src/api/settings.rs`, #20)
 
 | Path | Arguments | Result |
 |---|---|---|
-| `/api/settings/get` | none | `Settings`. A user who never saved any gets `Settings::defaults()`: kg, a 20 kg bar, the domain's default kg plate inventory (`PlateInventory::default_for(Kg)`), 120 s of rest, sound on. |
+| `/api/settings/get` | none | `Settings`. A user who never saved any gets `Settings::defaults()`: kg, a 20 kg bar, the domain's default kg plate inventory (`PlateInventory::default_for(Kg)`), 120 s of rest, sound and vibration on, weight steps of 2.5 kg and 5 lb (`kg_weight_step`, `lb_weight_step`, one per unit; `Settings::weight_step(unit)` picks the one in use). |
 | `/api/settings/update` | `settings: SettingsUpdate` | The saved `Settings` (plates sorted heaviest first). A full replace, so a retry is harmless. Concurrent updates (two devices) are last-writer-wins: the row always holds one whole update, never fields mixed from two. |
 | `/api/settings/training-maxes` | none | The user's `TrainingMax`es, by exercise id. |
 | `/api/settings/training-max/set` | `exercise_id`, `weight` (kg) | The saved `TrainingMax`. |
@@ -377,8 +408,15 @@ Epley formula.
   inventory as a plain list. The server validates them with the domain (`Weight::from_kg`,
   `PlateInventory::new`: no zero, duplicate or off-grid plate, at most 50 pairs and 16 sizes), and
   the default rest must be at most one hour. The bar must weigh more than zero and the inventory
-  must keep at least one plate size. Each refusal is an `InvalidField` naming `bar_weight`,
-  `plate_inventory` or `default_rest`. Weights out of range get a fixed message ("… must be between 0 and 2000 kg."), never the number echoed back. A typed `Weight` or `PlateInventory` argument would
+  must keep at least one plate size. Each weight step must be more than 0 and at most 25 kg
+  (`MAX_WEIGHT_STEP_KG`). Each refusal is an `InvalidField` naming `bar_weight`,
+  `plate_inventory`, `default_rest`, `kg_weight_step` or `lb_weight_step`.
+- **Weight step and vibration (#103)** used to be kept on the device. On the first load after
+  #103, the app carries a value still on the device over into a setting the server has at its
+  default, saves it, and removes the device's copy.
+  In `Settings` the three fields default when missing, so an export made before #103 still
+  imports (decision log #41). In `SettingsUpdate` they are optional: a client built before #103
+  leaves them out, and they keep their saved values. Weights out of range get a fixed message ("… must be between 0 and 2000 kg."), never the number echoed back. A typed `Weight` or `PlateInventory` argument would
   fail while the body is decoded, before the function runs, and only give the generic
   `422 Invalid request.` without saying which value is wrong.
 - **Defaults only when nothing was saved.** The defaults apply only while there is no

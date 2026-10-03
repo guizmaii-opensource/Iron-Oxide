@@ -238,6 +238,41 @@ mod tests {
         }
     }
 
+    /// A selected chip differs from an unselected one by at least 3:1 (WCAG 1.4.11). In the light
+    /// theme the fill alone is about 2.4:1 (#104), so its inset ring is the cue; in dark the fill
+    /// reaches 3:1 and the ring is the fill's colour (no visible ring).
+    #[test]
+    fn a_selected_chip_has_a_3_to_1_cue_in_both_themes() {
+        let css = css();
+        let selected = block(&css, ".io-chip[aria-pressed=\"true\"] {");
+        assert!(
+            selected.contains("box-shadow: inset 0 0 0 2px var(--io-chip-ring);"),
+            "{selected}"
+        );
+        let neighbours = ["chip", "ground", "surface"];
+        let light = light();
+        assert!(
+            contrast(&light["accent"], &light["chip"]) < 3.0,
+            "why the ring exists"
+        );
+        for neighbour in neighbours {
+            let ratio = contrast(&light["chip-ring"], &light[neighbour]);
+            assert!(
+                ratio >= 3.0,
+                "light: the ring next to {neighbour} is {ratio:.2}:1"
+            );
+        }
+        let dark = dark();
+        assert_eq!(dark["chip-ring"], dark["accent"], "no visible ring in dark");
+        for neighbour in neighbours {
+            let ratio = contrast(&dark["accent"], &dark[neighbour]);
+            assert!(
+                ratio >= 3.0,
+                "dark: the fill next to {neighbour} is {ratio:.2}:1"
+            );
+        }
+    }
+
     /// Tap targets are 56 px; 44 px is only for the header's icon buttons (and the header rows:
     /// the top bar and the workout's header).
     #[test]

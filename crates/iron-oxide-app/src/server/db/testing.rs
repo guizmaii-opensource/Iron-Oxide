@@ -111,6 +111,7 @@ pub fn new_set(session: SessionId) -> LoggedSet {
         duration_s: None,
         warmup: false,
         completed_at: at(60),
+        target: None,
     }
 }
 

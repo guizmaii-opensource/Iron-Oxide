@@ -86,20 +86,21 @@ pub fn fix_request(refusal: &Refusal) -> Option<String> {
     match refusal {
         Refusal::Extract(ExtractError::Empty | ExtractError::TooLong { .. }) => None,
         Refusal::Extract(ExtractError::NoJson) => Some(
-            "I could not find a JSON document in your answer. Reply with only the program, as \
-             one JSON document, with no text before or after it."
+            "I could not find the program in your answer. Reply with only the program, as one \
+             JSON document, with no text before or after it."
                 .to_owned(),
         ),
         Refusal::Extract(ExtractError::CutOff) => Some(
-            "Your answer was cut off before the JSON ended. Send the whole program again as one \
-             JSON document; if it is too long for one message, make the notes and the \
+            "Your answer was cut off before the JSON ended. Send the complete program again as \
+             one JSON document; if it is too long for one message, make the notes and the \
              description shorter."
                 .to_owned(),
         ),
-        Refusal::Extract(ExtractError::Several { count }) => Some(format!(
-            "Your answer contained {count} separate JSON objects. Reply with only the program, \
-             as one JSON document, with no text before or after it."
-        )),
+        Refusal::Extract(ExtractError::Several { .. }) => Some(
+            "Your answer contained more than one program. Send only the new one, as one JSON \
+             document, with no text before or after it."
+                .to_owned(),
+        ),
         Refusal::Problems(problems) => {
             let mut text = format!("{FIX_INSTRUCTION}\n\nProblems:\n");
             for problem in &problems.errors {
@@ -145,13 +146,60 @@ pub struct Saved {
     pub version: u32,
 }
 
+/// The pasted answer, its check and what was saved from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Flow {
+    pub answer: String,
+    pub checked: Option<Checked>,
+    pub saved: Option<Saved>,
+}
+
+impl Flow {
+    /// A new answer, typed (checked when asked) or pasted (checked now). Whatever was saved
+    /// before is done with: the new answer is what the screen shows.
+    pub fn take_answer(&mut self, answer: String, check_now: bool) {
+        self.checked = check_now.then(|| check_answer(&answer));
+        self.answer = answer;
+        self.saved = None;
+    }
+
+    /// Checks the answer as it is.
+    pub fn check(&mut self) {
+        self.checked = Some(check_answer(&self.answer));
+        self.saved = None;
+    }
+
+    /// The answer was saved: the screen offers to make it active.
+    pub fn saved(&mut self, saved: Saved) {
+        self.answer.clear();
+        self.checked = None;
+        self.saved = Some(saved);
+    }
+
+    /// The server refused the answer's program.
+    pub fn refused(&mut self, problems: ProgramProblems) {
+        self.checked = Some(Checked::Refused(Refusal::Problems(problems)));
+    }
+}
+
+/// Whether `program` is the same as the program's current version (`current`, its document).
+/// The `$schema` link is not part of the program: with or without it, they are the same.
+#[must_use]
+pub fn is_current_version(current: Option<&str>, program: &Program) -> bool {
+    let without_schema = |program: &Program| Program {
+        schema: None,
+        ..program.clone()
+    };
+    current
+        .and_then(|document| Program::from_json(document).ok())
+        .is_some_and(|current| without_schema(&current) == without_schema(program))
+}
+
 /// The flow's state, held by the Programs screen so it survives the lists reloading. Reset when
 /// the screen changes.
 #[derive(Clone, Copy, PartialEq)]
 pub struct AiState {
-    answer: Signal<String>,
-    checked: Signal<Option<Checked>>,
-    saved: Signal<Option<Saved>>,
+    flow: Signal<Flow>,
     /// A clipboard notice (copied, or blocked: what to do instead).
     notice: Signal<Option<String>>,
     show_prompt: Signal<bool>,
@@ -161,19 +209,23 @@ pub struct AiState {
 impl AiState {
     pub fn new() -> Self {
         Self {
-            answer: Signal::new(String::new()),
-            checked: Signal::new(None),
-            saved: Signal::new(None),
+            flow: Signal::new(Flow::default()),
             notice: Signal::new(None),
             show_prompt: Signal::new(false),
             busy: Signal::new(false),
         }
     }
 
+    /// Changes the flow, if the screen is still there.
+    fn update(self, change: impl FnOnce(&mut Flow)) {
+        let mut flow = self.flow;
+        if let Ok(mut flow) = flow.try_write() {
+            change(&mut flow);
+        }
+    }
+
     pub fn reset(self) {
-        try_set(self.answer, String::new());
-        try_set(self.checked, None);
-        try_set(self.saved, None);
+        try_set(self.flow, Flow::default());
         try_set(self.notice, None);
         try_set(self.show_prompt, false);
     }
@@ -244,8 +296,11 @@ pub fn AiFlow(
 ) -> Element {
     let ai = state.ai;
     let prompt = prompt_for(current.as_deref());
-    let checked = ai.checked.read().clone();
-    let saved = ai.saved.read().clone();
+    let Flow {
+        answer,
+        checked,
+        saved,
+    } = ai.flow.read().clone();
     let busy =
         *ai.busy.read() || (target.is_none() && state.intents.uploads.read().any_in_flight());
     let allowed = allowed.unwrap_or(true);
@@ -282,8 +337,7 @@ pub fn AiFlow(
         spawn(async move {
             match read.await {
                 Some(text) if !text.trim().is_empty() => {
-                    try_set(ai.checked, Some(check_answer(&text)));
-                    try_set(ai.answer, text);
+                    ai.update(|flow| flow.take_answer(text, true));
                     try_set(ai.notice, None);
                 }
                 Some(_) => {
@@ -306,9 +360,7 @@ pub fn AiFlow(
         });
     };
     let check = move |_| {
-        let answer = ai.answer.peek().clone();
-        try_set(ai.checked, Some(check_answer(&answer)));
-        try_set(ai.saved, None);
+        ai.update(Flow::check);
         try_set(ai.notice, None);
     };
     let field_id = if target.is_some() {
@@ -355,10 +407,9 @@ pub fn AiFlow(
                         placeholder: "Paste your AI's whole answer here",
                         spellcheck: false,
                         autocomplete: "off",
-                        value: "{ai.answer}",
+                        value: "{answer}",
                         oninput: move |event| {
-                            try_set(ai.answer, event.value());
-                            try_set(ai.checked, None);
+                            ai.update(|flow| flow.take_answer(event.value(), false));
                         },
                     }
                     div { class: "io-ai-buttons",
@@ -378,7 +429,14 @@ pub fn AiFlow(
             if let Some(saved) = saved {
                 SavedCard { state, saved, target, active }
             } else if let Some(Checked::Ready { document, program }) = checked {
-                Preview { state, document, program, target, busy }
+                Preview {
+                    state,
+                    unchanged: is_current_version(current.as_deref(), &program),
+                    document,
+                    program,
+                    target,
+                    busy,
+                }
             }
         }
     }
@@ -440,6 +498,8 @@ fn Preview(
     program: Program,
     target: Option<ProgramId>,
     busy: bool,
+    /// The program equals the current version: nothing to save.
+    unchanged: bool,
 ) -> Element {
     let save_document = document.clone();
     let save = move |_| {
@@ -468,7 +528,14 @@ fn Preview(
         }
         ProgramDays { document: program.clone() }
         div { class: "io-actions",
-            Button { block: true, busy, onclick: save, "{label}" }
+            if unchanged {
+                p { class: "io-notice io-notice-info", role: "status",
+                    "This is the same as the current version: your AI changed nothing. Tell it \
+                     what you want to change, then paste its new answer."
+                }
+            } else {
+                Button { block: true, busy, onclick: save, "{label}" }
+            }
             Button {
                 variant: ButtonVariant::Ghost,
                 block: true,
@@ -509,26 +576,22 @@ async fn save(state: Programs, target: Option<ProgramId>, document: String) {
                 (true, false) => format!("\u{201c}{}\u{201d} saved.", outcome.program.name),
             };
             state.errors.show(BannerKind::Info, message);
-            if state.is_on(&origin) {
-                try_set(state.ai.answer, String::new());
-                try_set(state.ai.checked, None);
-                try_set(
-                    state.ai.saved,
-                    Some(Saved {
+            // A new version equal to the latest one saved nothing: the preview stays.
+            let saved_something = outcome.saved || target.is_none();
+            if saved_something && state.is_on(&origin) {
+                state.ai.update(|flow| {
+                    flow.saved(Saved {
                         program: outcome.program,
                         version: outcome.version.version,
-                    }),
-                );
+                    });
+                });
             }
             state.changed();
         }
         Err(error) => match ProgramProblems::from_error(&error) {
             // The server's checks are the same as the preview's, but they decide.
             Some(problems) if state.is_on(&origin) => {
-                try_set(
-                    state.ai.checked,
-                    Some(Checked::Refused(Refusal::Problems(problems))),
-                );
+                state.ai.update(|flow| flow.refused(problems));
             }
             _ => state.fail(&error, &origin),
         },
@@ -622,6 +685,20 @@ mod tests {
             check_answer(&format!("{VALID}\n{VALID}")),
             Checked::Refused(Refusal::Extract(ExtractError::Several { count: 2 }))
         );
+        // Review of #111: a valid snippet beside a broken program is not what gets reported.
+        let Checked::Refused(Refusal::Problems(problems)) = check_answer(&format!(
+            "Increments look like {{\"kg\": 2.5}}.\n```json\n{}\n```",
+            VALID.replace("\"rotation\"", "\"x\": 1,, \"rotation\"")
+        )) else {
+            panic!("not refused with problems");
+        };
+        assert!(
+            problems
+                .errors
+                .iter()
+                .all(|problem| !problem.message.contains("kg")),
+            "{problems:?}"
+        );
         // The validator is not relaxed: a program that breaks a rule is refused with its path.
         let broken = VALID.replace("\"sets\": 3", "\"sets\": 0");
         let Checked::Refused(Refusal::Problems(problems)) = check_answer(&broken) else {
@@ -633,7 +710,7 @@ mod tests {
         );
         // A syntax error carries its position in the JSON.
         let Checked::Refused(Refusal::Problems(problems)) =
-            check_answer("```json\n{\"schema_version\": 1,}\n```")
+            check_answer("```json\n{\"name\": \"x\", \"days\": [],}\n```")
         else {
             panic!("accepted");
         };
@@ -693,8 +770,69 @@ mod tests {
         assert!(
             request(ExtractError::Several { count: 3 })
                 .unwrap()
-                .contains("3 separate JSON objects")
+                .contains("more than one program")
         );
+    }
+
+    fn saved() -> Saved {
+        Saved {
+            program: ProgramView {
+                id: ProgramId::from_uuid(uuid::Uuid::from_u128(1)),
+                name: "Old".to_owned(),
+                source_builtin_id: None,
+                archived: false,
+                created_at: iron_oxide_domain::time::Timestamp::from_epoch_millis(0),
+            },
+            version: 1,
+        }
+    }
+
+    /// Review of #111: after a save, a new answer (pasted or typed) replaces the saved card.
+    #[test]
+    fn a_new_answer_after_a_save_shows_its_own_preview() {
+        let mut flow = Flow::default();
+        flow.take_answer(VALID.to_owned(), true);
+        flow.saved(saved());
+        assert_eq!(flow.answer, "");
+        let other = VALID.replace("\"Mine\"", "\"Other\"");
+        flow.take_answer(other.clone(), true);
+        assert_eq!(flow.saved, None);
+        assert!(matches!(
+            &flow.checked,
+            Some(Checked::Ready { program, .. }) if program.name == "Other"
+        ));
+        // Typing: the saved card goes too, and the answer waits for "Check the program".
+        flow.saved(saved());
+        flow.take_answer(other, false);
+        assert_eq!(
+            (flow.saved.is_some(), flow.checked.is_some()),
+            (false, false)
+        );
+        flow.check();
+        assert!(matches!(flow.checked, Some(Checked::Ready { .. })));
+    }
+
+    #[test]
+    fn an_answer_equal_to_the_current_version_is_recognised() {
+        let Checked::Ready { program, .. } = check_answer(VALID) else {
+            panic!("refused");
+        };
+        let current = program.to_json_pretty().unwrap();
+        assert!(is_current_version(Some(&current), &program));
+        let other = Program::from_json(&VALID.replace("\"Mine\"", "\"Other\"")).unwrap();
+        assert!(!is_current_version(Some(&current), &other));
+        assert!(!is_current_version(None, &program));
+        // Fix round of #111: the stored version carries `$schema`, the AI's answer doesn't.
+        assert_eq!(program.schema, None);
+        let with_schema = VALID.replacen(
+            '{',
+            &format!(
+                "{{\"$schema\": \"{}\",",
+                iron_oxide_domain::program::PROGRAM_SCHEMA_URL
+            ),
+            1,
+        );
+        assert!(is_current_version(Some(&with_schema), &program));
     }
 
     #[test]

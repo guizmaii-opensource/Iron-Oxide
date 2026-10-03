@@ -6,9 +6,10 @@
   "type": "object",
   "properties": {
     "$schema": {
-      "description": "Optional link to this JSON Schema, so editors can check and complete the document. Only\nthe published URL is accepted.",
+      "description": "Optional link to this JSON Schema, so editors can check and complete the document. Only\nthe published URL is accepted (or the one from before the repository moved).",
       "enum": [
         "https://raw.githubusercontent.com/fe2o3-labs/Iron-Oxide/main/schemas/program.schema.json",
+        "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json",
         null
       ]
     },

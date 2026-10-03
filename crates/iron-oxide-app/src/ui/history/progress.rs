@@ -2,11 +2,12 @@
 //! a data table. A Pro feature (`Feature::ExerciseCharts`): without it, the locked card.
 
 use dioxus::prelude::*;
-use iron_oxide_domain::{ExerciseId, Unit};
+use iron_oxide_domain::ExerciseId;
 
-use super::chart::{self, VIEW_HEIGHT, VIEW_WIDTH, WeightPoint};
+use super::chart::{self, ChartLayout, VIEW_HEIGHT, VIEW_WIDTH, WeightPoint};
 use super::view::{
-    Measure, chart_series, chart_summary, charts_locked_after, latest_number, series_rows,
+    Measure, chart_series, chart_summary, charts_locked_after, latest_number, latest_volume,
+    series_rows, volume_summary,
 };
 use super::{BackToHistory, ChartAccess, local_date, use_history};
 use crate::api::billing::my_entitlements;
@@ -128,7 +129,7 @@ fn Charts(exercise: ExerciseId) -> Element {
         Some(Ok(loaded)) if loaded.points.is_empty() => rsx! {
             EmptyState {
                 title: "No data yet",
-                message: "Log a weighted working set of this exercise and finish the workout to start its charts.",
+                message: "Charts start once a workout with a working set of this exercise, with a weight and reps (not a timed hold), is finished.",
             }
         },
         Some(Ok(loaded)) => rsx! { Loaded { series: loaded.clone() } },
@@ -141,32 +142,58 @@ fn Loaded(series: ExerciseSeries) -> Element {
     let unit = use_unit();
     let lines = chart_series(&series);
     let rows = series_rows(&series, unit);
+    let date = |ms: i64| local_date(ms).short();
+    let weight_line = |title: &str, points: &[WeightPoint], measure: Measure| {
+        (
+            chart::layout(points, unit, date),
+            latest_number(points, measure, unit),
+            chart_summary(title, points, measure, unit, date),
+        )
+    };
+    let (e1rm_layout, e1rm_latest, e1rm_summary) =
+        weight_line("Estimated 1RM", &lines.e1rm, Measure::Estimate);
+    let (top_layout, top_latest, top_summary) =
+        weight_line("Top set", &lines.top_set, Measure::Load);
 
     rsx! {
         ChartCard {
             id: "e1rm",
             title: "Estimated 1RM",
-            points: lines.e1rm,
-            measure: Measure::Estimate,
-            unit,
+            layout: e1rm_layout,
+            latest: e1rm_latest,
+            summary: e1rm_summary,
+            unit: unit.symbol(),
             empty: "No estimate yet: estimates need sets of 10 reps or fewer.",
         }
         ChartCard {
             id: "top-set",
             title: "Top set",
-            points: lines.top_set,
-            measure: Measure::Load,
-            unit,
+            layout: top_layout,
+            latest: top_latest,
+            summary: top_summary,
+            unit: unit.symbol(),
             empty: "No top set yet.",
+        }
+        ChartCard {
+            id: "volume",
+            title: "Volume",
+            layout: chart::volume_layout(&lines.volume, unit, date),
+            latest: latest_volume(&lines.volume, unit),
+            summary: volume_summary("Volume", &lines.volume, unit, date),
+            unit: unit.symbol(),
+            empty: "No volume yet.",
         }
         Card { title: "Sessions",
             table { class: "io-table",
-                caption { class: "io-sr-only", "Top set and estimated 1RM per session, newest first" }
+                caption { class: "io-sr-only",
+                    "Top set, estimated 1RM and volume per session, newest first"
+                }
                 thead {
                     tr {
                         th { scope: "col", "Date" }
                         th { scope: "col", "Top set" }
                         th { scope: "col", "e1RM" }
+                        th { scope: "col", "Volume" }
                     }
                 }
                 tbody {
@@ -175,6 +202,7 @@ fn Loaded(series: ExerciseSeries) -> Element {
                             th { scope: "row", {local_date(row.at_ms).short()} }
                             td { "{row.top_set}" }
                             td { "{row.e1rm}" }
+                            td { "{row.volume}" }
                         }
                     }
                 }
@@ -188,15 +216,12 @@ fn Loaded(series: ExerciseSeries) -> Element {
 fn ChartCard(
     id: &'static str,
     title: &'static str,
-    points: Vec<WeightPoint>,
-    measure: Measure,
-    unit: Unit,
+    layout: Option<ChartLayout>,
+    latest: Option<String>,
+    summary: String,
+    unit: &'static str,
     empty: &'static str,
 ) -> Element {
-    let date = |ms: i64| local_date(ms).short();
-    let summary = chart_summary(title, &points, measure, unit, date);
-    let latest = latest_number(&points, measure, unit);
-    let layout = chart::layout(&points, unit, date);
     let title_id = format!("io-chart-{id}");
 
     rsx! {
@@ -207,7 +232,7 @@ fn ChartCard(
                     p { class: "io-chart-latest",
                         span { class: "io-sr-only", "Latest: " }
                         span { class: "io-chart-number", "{latest}" }
-                        span { class: "io-chart-unit", "{unit.symbol()}" }
+                        span { class: "io-chart-unit", "{unit}" }
                     }
                 }
             }

@@ -19,9 +19,14 @@ group's limit does not affect another's.
 | `auth_finish` | `passkey/sign-up/finish`, `passkey/sign-in/finish`, `passkey/add/finish` | 30 at once, then 1 every 2 s | 10 at once, then 1 a minute |
 | `google_callback` | `GET`/`HEAD /auth/google/callback` | 30 at once, then 1 every 2 s | none |
 | `session` | `auth/me`, `auth/sign-out` | 300 at once, then 5 a second | none |
-| `account` | `passkey/remove`, `google/unlink` | 60 at once, then 1 a second | 10 at once, then 1 a minute |
+| `account` | `passkey/remove`, `google/unlink`, `rename` | 60 at once, then 1 a second | 10 at once, then 1 a minute |
+| `sign_out_everywhere` | `sign-out-everywhere` | 60 at once, then 1 a second | 10 at once, then 1 a minute |
 | `account_data` | `/api/account/export`, `/api/account/import`, `/api/account/delete` | 30 at once, then 1 every 2 s | 10 at once, then 1 every 2 minutes |
 | `write` | every other `POST`, `PUT`, `PATCH` or `DELETE`, on any path | 600 at once, then 10 a second | 120 at once, then 2 a second |
+
+`sign_out_everywhere` has its own bucket because it is how an owner ends a stolen session: a
+thief holding that session could otherwise empty the `account` bucket with renames and keep the
+owner from using it. Its first call ends the thief's session too.
 
 Route paths are under `/api/auth/` unless shown in full. Requests with a safe method (`GET`, `HEAD`,
 `OPTIONS`, `TRACE`) are never limited, except the Google callback. That keeps page loads, assets,
@@ -166,7 +171,7 @@ When a new key arrives and its table is full:
       4 alive. Holding the table therefore takes about 12,500 `/48`s sustained, or about 420 for
       a single 2-second burst.
     - That is botnet scale. At that rate the `auth_begin` rows hurt the database first.
-  - `session`, `account` and `write` **fail open**. The request goes through without its key
+  - `session`, `account`, `sign_out_everywhere` and `write` **fail open**. The request goes through without its key
     being tracked, and a warning is logged. These only do something for a signed-in user, whose
     sign-in was itself limited. The per-user limits still apply, and locking every new client out
     of them would hurt more than it protects.

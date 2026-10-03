@@ -43,6 +43,21 @@ pub async fn sign_out() -> Result<(), ServerFnError> {
     Ok(ctx.sign_out().await?)
 }
 
+/// Signs out on every device: deletes all of the user's sessions, this one included, and clears
+/// this device's cookie. It only takes access away, so it needs no further check.
+#[post("/api/auth/sign-out-everywhere", ctx: AuthContext, user: AuthUser)]
+pub async fn sign_out_everywhere() -> Result<(), ServerFnError> {
+    Ok(ctx.sign_out_everywhere(user.user_id()).await?)
+}
+
+/// Renames the account. `display_name` is trimmed, must not be blank, at most
+/// [`MAX_NAME_CHARS`](super::types::MAX_NAME_CHARS) characters and without control characters
+/// (`400` otherwise). Returns the account as renamed.
+#[post("/api/auth/rename", ctx: AuthContext, user: AuthUser)]
+pub async fn rename_account(display_name: String) -> Result<Me, ServerFnError> {
+    Ok(passkeys::rename(&ctx, user.user_id(), &display_name).await?)
+}
+
 /// Starts creating an account with a passkey. Pass it to `navigator.credentials.create()`.
 ///
 /// `display_name` (optional, at most 64 characters) names the account in the passkey manager.

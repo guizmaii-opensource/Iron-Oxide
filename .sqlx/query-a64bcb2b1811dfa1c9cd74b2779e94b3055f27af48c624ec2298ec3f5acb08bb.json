@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT st.id, st.session_id, st.exercise_id, st.set_index, st.reps, st.weight_ng,\n                st.duration_s, st.warmup, st.completed_at\n         FROM workout_sets st\n         JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id\n         JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id\n         WHERE st.user_id = $1 AND st.exercise_id = $3 AND st.completed_at > $4\n           AND s.status = 'completed' AND v.program_id = $2\n         ORDER BY st.completed_at, st.id",
+  "query": "SELECT id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,\n                completed_at\n         FROM workout_sets WHERE user_id = $1 AND session_id = ANY($2)\n         ORDER BY completed_at, id",
   "describe": {
     "columns": [
       {
@@ -52,9 +52,7 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid",
-        "Text",
-        "Timestamptz"
+        "UuidArray"
       ]
     },
     "nullable": [
@@ -69,5 +67,5 @@
       false
     ]
   },
-  "hash": "482e2ab43566b4ff9eb38e760309081643f2b03cc68a2997eb810a702bae5b4b"
+  "hash": "a64bcb2b1811dfa1c9cd74b2779e94b3055f27af48c624ec2298ec3f5acb08bb"
 }

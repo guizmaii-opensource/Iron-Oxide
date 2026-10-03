@@ -2,15 +2,20 @@
 //! verifier.
 //!
 //! The state itself is stored in `auth_ceremonies`; the session only holds the row's random id,
-//! under one key per kind. Taking a ceremony removes the id from the session and deletes the row
-//! in the same statement that reads it (`DELETE ... RETURNING`), so it can be used once, even by
-//! two concurrent requests with the same cookie. Session data alone could not guarantee that:
-//! each request works on its own copy, saved after the handler returns.
+//! under one key per kind. Taking a ceremony deletes the row in the same statement that reads it
+//! (`DELETE ... RETURNING`), so it can be used once, even by two concurrent requests with the
+//! same cookie. Session data alone could not guarantee that: each request works on its own copy,
+//! saved after the handler returns.
+//!
+//! A passkey ceremony is completed with [`complete`]: the delete runs in the same transaction as
+//! the work it allows, so a retryable failure (`503`: no pooled connection in time, a statement
+//! deadline, a serialization failure) rolls the delete back too, and replaying the same request
+//! can succeed. Any other failure consumes it.
 
 use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
-use sqlx::PgPool;
+use sqlx::{Connection as _, PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use tower_sessions::Session;
 use uuid::Uuid;
@@ -123,31 +128,89 @@ impl Taken {
     }
 }
 
-/// Takes (and deletes) the session's ceremony of `kind`.
+/// Completes the session's ceremony of `kind` in one transaction: takes (deletes) it, runs
+/// `finish` with its state, and commits both together.
+///
+/// - Success: committed, and the ceremony is removed from the session.
+/// - A retryable failure ([`AuthError::is_retryable`], `503`), from the take, `finish` or the
+///   commit: everything is rolled back, the ceremony included, and the session is left as it was.
+///   Replaying the same request can succeed.
+/// - Any other failure (verification, an unknown passkey, a limit): `finish`'s work is rolled
+///   back (a savepoint) but the ceremony stays consumed, as a one-time ceremony must.
 ///
 /// Fails with [`AuthError::Ceremony`] if the session has none, it was already used, it expired,
 /// or it is bound to a different user than `user` (see [`CeremonyKind::needs_user`]).
-pub async fn take<T: DeserializeOwned>(
+pub async fn complete<T, R>(
     pool: &PgPool,
     session: &Session,
     kind: CeremonyKind,
     user: Option<UserId>,
-) -> Result<T, AuthError> {
-    let id = session
-        .remove::<Uuid>(kind.session_key())
-        .await?
-        .ok_or(AuthError::Ceremony("none in this session"))?;
-    shorten_if_signed_out(session).await?;
-    let row = sqlx::query!(
+    finish: impl AsyncFnOnce(&mut Transaction<'_, Postgres>, T) -> Result<R, AuthError>,
+) -> Result<R, AuthError>
+where
+    T: DeserializeOwned,
+{
+    let Some(id) = session.get::<Uuid>(kind.session_key()).await? else {
+        shorten_if_signed_out(session).await?;
+        return Err(AuthError::Ceremony("none in this session"));
+    };
+    let mut tx = pool.begin().await?;
+    let Some(row) = sqlx::query!(
         r#"DELETE FROM auth_ceremonies WHERE id = $1 AND kind = $2
            RETURNING kind AS "kind: CeremonyKind", user_id, state, expires_at > now() AS "live!""#,
         id,
         kind as CeremonyKind,
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?
-    .ok_or(AuthError::Ceremony("unknown or already used"))?;
-    checked(row.kind, row.user_id, row.state, row.live, user)?.state()
+    else {
+        forget(session, kind).await?;
+        return Err(AuthError::Ceremony("unknown or already used"));
+    };
+    let state = match checked(row.kind, row.user_id, row.state, row.live, user)
+        .and_then(Taken::state::<T>)
+    {
+        Ok(state) => state,
+        Err(error) => return consumed(tx, session, kind, error).await,
+    };
+
+    let mut work = tx.begin().await?;
+    match finish(&mut work, state).await {
+        Ok(result) => {
+            work.commit().await?;
+            tx.commit().await?;
+            forget(session, kind).await?;
+            Ok(result)
+        }
+        Err(error) if error.is_retryable() => {
+            // Explicitly, rather than on drop: the connection goes back to the pool clean.
+            let _ = work.rollback().await;
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+        Err(error) => {
+            work.rollback().await?;
+            consumed(tx, session, kind, error).await
+        }
+    }
+}
+
+/// Commits the take alone (the ceremony is used up) and returns `error`.
+async fn consumed<R>(
+    tx: Transaction<'_, Postgres>,
+    session: &Session,
+    kind: CeremonyKind,
+    error: AuthError,
+) -> Result<R, AuthError> {
+    tx.commit().await?;
+    forget(session, kind).await?;
+    Err(error)
+}
+
+/// Removes the ceremony's id from the session.
+async fn forget(session: &Session, kind: CeremonyKind) -> Result<(), AuthError> {
+    session.remove::<Uuid>(kind.session_key()).await?;
+    shorten_if_signed_out(session).await
 }
 
 const GOOGLE_KINDS: [CeremonyKind; 2] = [CeremonyKind::GoogleSignIn, CeremonyKind::GoogleLink];

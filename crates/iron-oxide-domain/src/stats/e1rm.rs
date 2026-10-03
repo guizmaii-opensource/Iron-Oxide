@@ -22,6 +22,10 @@ pub enum E1rmFormula {
 }
 
 impl E1rmFormula {
+    /// The formula of every statistic the app reports: the records of the end-of-session summary,
+    /// the history's e1RM, PR flags and charts. One constant, so they cannot disagree.
+    pub const STANDARD: Self = Self::Epley;
+
     /// Both formulas, for pickers.
     pub const ALL: [Self; 2] = [Self::Epley, Self::Brzycki];
 
@@ -54,11 +58,11 @@ impl E1rmFormula {
     }
 }
 
-/// Estimates the one-rep max with the default formula ([`E1rmFormula::Epley`]). See
+/// Estimates the one-rep max with the app's formula ([`E1rmFormula::STANDARD`], Epley). See
 /// [`E1rmFormula::estimate`].
 #[must_use]
 pub fn estimate_1rm(weight: Weight, reps: Reps) -> Option<Weight> {
-    E1rmFormula::default().estimate(weight, reps)
+    E1rmFormula::STANDARD.estimate(weight, reps)
 }
 
 #[cfg(test)]
@@ -192,6 +196,7 @@ mod tests {
     #[test]
     fn default_formula_is_epley() {
         assert_eq!(E1rmFormula::default(), E1rmFormula::Epley);
+        assert_eq!(E1rmFormula::STANDARD, E1rmFormula::default());
         assert_eq!(estimate_1rm(kg(100.0), reps(5)), epley(100.0, 5));
         assert_eq!(estimate_1rm(kg(100.0), reps(13)), None);
     }

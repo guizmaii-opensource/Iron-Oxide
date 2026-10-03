@@ -14,7 +14,7 @@ use crate::api::error::ApiFailure;
 use crate::auth::api::{
     google_begin, google_unlink, is_unauthorized, me, passkey_add_begin, passkey_add_finish,
     passkey_remove, passkey_sign_in_begin, passkey_sign_in_finish, passkey_sign_up_begin,
-    passkey_sign_up_finish, sign_out,
+    passkey_sign_up_finish, rename_account, sign_out, sign_out_everywhere,
 };
 use crate::auth::browser::{
     self, BrowserError, GoogleCallbackListener, GoogleNavigation, GooglePopup,
@@ -57,6 +57,8 @@ enum Busy {
     RemovePasskey(PasskeyId),
     UnlinkGoogle,
     SignOut,
+    Rename,
+    SignOutEverywhere,
 }
 
 /// Why a sign-in step failed.
@@ -84,6 +86,15 @@ fn failure_notice(failure: &Failure) -> Notice {
         Failure::Browser(error) if error.is_cancelled() => Notice::Info(error.to_string()),
         Failure::Browser(error) => Notice::Error(error.to_string()),
         Failure::Server(error) => Notice::Error(server_message(error)),
+    }
+}
+
+/// The name to save, trimmed, or why it cannot be saved (the server checks the same).
+fn new_name(raw: &str) -> Result<String, String> {
+    match normalize_name(raw) {
+        Ok(Some(name)) => Ok(name),
+        Ok(None) => Err("Your name must not be blank.".to_owned()),
+        Err(problem) => Err(format!("Your name {problem}.")),
     }
 }
 
@@ -565,6 +576,7 @@ fn SignedOut(auth: Auth) -> Element {
 #[component]
 fn SignedIn(auth: Auth, me: Me) -> Element {
     let mut nickname = use_signal(String::new);
+    let mut name = use_signal(|| me.display_name.clone().unwrap_or_default());
     let busy = *auth.busy.read();
     let disabled = busy.is_some();
     let last_method = me.sign_in_methods() <= 1;
@@ -641,6 +653,59 @@ fn SignedIn(auth: Auth, me: Me) -> Element {
         });
     };
 
+    let rename = move |_| {
+        let display_name = match new_name(&name.peek()) {
+            Ok(display_name) => display_name,
+            Err(problem) => {
+                auth.fail(Notice::Error(problem));
+                return;
+            }
+        };
+        if !auth.start(Busy::Rename) {
+            return;
+        }
+        spawn(async move {
+            let result = rename_account(display_name).await.map_err(Failure::Server);
+            if let Ok(me) = &result {
+                name.set(me.display_name.clone().unwrap_or_default());
+            }
+            auth.finish(result, Some("Name saved."));
+        });
+    };
+
+    let do_sign_out_everywhere = move |_| {
+        if auth.busy.peek().is_some()
+            || !browser::confirm(
+                "Sign out on every device, this one included? You will need to sign in again \
+                 everywhere.",
+            )
+        {
+            return;
+        }
+        if !auth.start(Busy::SignOutEverywhere) {
+            return;
+        }
+        spawn(async move {
+            let mut auth = auth;
+            match sign_out_everywhere().await {
+                Ok(()) => {
+                    outbox.signed_out(user_id);
+                    auth.state.set(AccountState::SignedOut);
+                    auth.notice.set(Some(Notice::Info(
+                        "You are signed out on every device.".to_owned(),
+                    )));
+                    auth.busy.set(None);
+                }
+                Err(error) if is_signed_out_error(&error) => {
+                    outbox.signed_out(user_id);
+                    auth.state.set(AccountState::SignedOut);
+                    auth.busy.set(None);
+                }
+                Err(error) => auth.fail(Notice::Error(server_message(&error))),
+            }
+        });
+    };
+
     let greeting = match &me.display_name {
         Some(name) => format!("Hi, {name}"),
         None => "Signed in".to_owned(),
@@ -658,6 +723,31 @@ fn SignedIn(auth: Auth, me: Me) -> Element {
                 "aria-busy": busy == Some(Busy::SignOut),
                 onclick: do_sign_out,
                 if busy == Some(Busy::SignOut) { "Signing out…" } else { "Sign out" }
+            }
+        }
+
+        h3 { "Your name" }
+        div { class: "io-field",
+            label { r#for: "account-name", class: "io-sr-only", "Your name" }
+            div { class: "io-inline",
+                input {
+                    id: "account-name",
+                    class: "io-input",
+                    r#type: "text",
+                    autocomplete: "name",
+                    maxlength: MAX_NAME_CHARS,
+                    value: "{name}",
+                    disabled,
+                    oninput: move |event| name.set(event.value()),
+                }
+                button {
+                    id: "account-rename",
+                    class: "io-button io-button-secondary",
+                    disabled,
+                    "aria-busy": busy == Some(Busy::Rename),
+                    onclick: rename,
+                    if busy == Some(Busy::Rename) { "Saving…" } else { "Save" }
+                }
             }
         }
 
@@ -721,6 +811,19 @@ fn SignedIn(auth: Auth, me: Me) -> Element {
                 "Link Google"
             }
             GoogleWaiting { auth }
+        }
+
+        h3 { "Devices" }
+        p { class: "io-muted io-hint",
+            "Lost a phone, or signed in on a shared computer? Sign out everywhere at once."
+        }
+        button {
+            id: "sign-out-everywhere",
+            class: "io-button io-button-danger",
+            disabled,
+            "aria-busy": busy == Some(Busy::SignOutEverywhere),
+            onclick: do_sign_out_everywhere,
+            if busy == Some(Busy::SignOutEverywhere) { "Signing out…" } else { "Sign out on every device" }
         }
     }
 }
@@ -944,5 +1047,16 @@ mod tests {
         assert_eq!(short_date("yesterday"), "yesterday");
         assert_eq!(short_date("2026/09/28T00:00:00Z"), "2026/09/28T00:00:00Z");
         assert_eq!(short_date("é2026-09-28"), "é2026-09-28");
+    }
+
+    #[test]
+    fn a_new_name_is_trimmed_and_must_not_be_blank() {
+        assert_eq!(new_name("  Jules "), Ok("Jules".to_owned()));
+        assert_eq!(
+            new_name("   "),
+            Err("Your name must not be blank.".to_owned())
+        );
+        assert!(new_name("a\u{7}b").unwrap_err().contains("control"));
+        assert!(new_name(&"x".repeat(MAX_NAME_CHARS + 1)).is_err());
     }
 }

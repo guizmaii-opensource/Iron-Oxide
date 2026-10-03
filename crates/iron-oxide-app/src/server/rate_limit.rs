@@ -68,8 +68,12 @@ pub enum RouteGroup {
     GoogleCallback,
     /// `me` (polled by the UI while waiting for Google) and sign-out: read-only or harmless.
     Session,
-    /// Removing a passkey or unlinking Google.
+    /// Removing a passkey, unlinking Google, renaming the account.
     Account,
+    /// Signing out on every device (#103): a security action the owner must always be able to
+    /// take, so it has its own bucket that the other account calls (which a stolen session can
+    /// make at will) cannot use up.
+    SignOutEverywhere,
     /// The user's data as a whole (#22): exporting, importing and deleting the account. Each call
     /// reads or writes everything the user owns.
     AccountData,
@@ -78,7 +82,7 @@ pub enum RouteGroup {
 }
 
 impl RouteGroup {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::AuthBegin,
         Self::AuthFinish,
         Self::GoogleCallback,
@@ -86,6 +90,7 @@ impl RouteGroup {
         Self::Account,
         Self::AccountData,
         Self::Write,
+        Self::SignOutEverywhere,
     ];
 
     const fn index(self) -> usize {
@@ -97,6 +102,7 @@ impl RouteGroup {
             Self::Account => 4,
             Self::AccountData => 5,
             Self::Write => 6,
+            Self::SignOutEverywhere => 7,
         }
     }
 
@@ -107,6 +113,7 @@ impl RouteGroup {
             Self::GoogleCallback => "google_callback",
             Self::Session => "session",
             Self::Account => "account",
+            Self::SignOutEverywhere => "sign_out_everywhere",
             Self::AccountData => "account_data",
             Self::Write => "write",
         }
@@ -126,6 +133,11 @@ pub const ROUTES: &[(&str, RouteGroup)] = &[
     ("/api/auth/sign-out", RouteGroup::Session),
     ("/api/auth/passkey/remove", RouteGroup::Account),
     ("/api/auth/google/unlink", RouteGroup::Account),
+    (
+        "/api/auth/sign-out-everywhere",
+        RouteGroup::SignOutEverywhere,
+    ),
+    ("/api/auth/rename", RouteGroup::Account),
     ("/api/account/export", RouteGroup::AccountData),
     ("/api/account/import", RouteGroup::AccountData),
     ("/api/account/delete", RouteGroup::AccountData),
@@ -173,6 +185,7 @@ pub struct Limits {
     pub google_callback: GroupLimits,
     pub session: GroupLimits,
     pub account: GroupLimits,
+    pub sign_out_everywhere: GroupLimits,
     pub account_data: GroupLimits,
     pub write: GroupLimits,
     /// The most keys (IPs or users) one limiter remembers; see [`limiter`].
@@ -239,6 +252,14 @@ impl Default for Limits {
                 per_user: Some(ACCOUNT_PER_USER),
                 when_full: WhenFull::Allow,
             },
+            // Its own bucket, the same size as the account one: a stolen session can drain the
+            // account bucket with renames, never this one (and its first call ends that session).
+            sign_out_everywhere: GroupLimits {
+                per_ip: Some(ACCOUNT_PER_IP),
+                per_ipv6_48: None,
+                per_user: Some(ACCOUNT_PER_USER),
+                when_full: WhenFull::Allow,
+            },
             account_data: GroupLimits {
                 per_ip: Some(ACCOUNT_DATA_PER_IP),
                 per_ipv6_48: None,
@@ -265,6 +286,7 @@ impl Limits {
             RouteGroup::GoogleCallback => self.google_callback,
             RouteGroup::Session => self.session,
             RouteGroup::Account => self.account,
+            RouteGroup::SignOutEverywhere => self.sign_out_everywhere,
             RouteGroup::AccountData => self.account_data,
             RouteGroup::Write => self.write,
         }
@@ -574,6 +596,7 @@ mod tests {
         for group in [
             RouteGroup::Session,
             RouteGroup::Account,
+            RouteGroup::SignOutEverywhere,
             RouteGroup::AccountData,
             RouteGroup::Write,
         ] {

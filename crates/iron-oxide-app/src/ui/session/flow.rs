@@ -20,9 +20,7 @@ use iron_oxide_domain::program::{Exercise, Work};
 use iron_oxide_domain::progression::{NextTargets, SetGoal, SetTarget};
 use iron_oxide_domain::time::Timestamp;
 use iron_oxide_domain::timer::IntervalPlan;
-use iron_oxide_domain::{
-    ExerciseId, LoggedSet, PlateInventory, Reps, Seconds, SetId, Unit, Weight,
-};
+use iron_oxide_domain::{ExerciseId, LoggedSet, Reps, Seconds, SetId, Unit, Weight};
 
 use crate::api::sessions::{PlannedExercise, SessionPlan};
 use crate::ui::weight::weight_text;
@@ -39,6 +37,12 @@ pub struct Step {
     pub of: u16,
     /// What to prefill.
     pub target: SetTarget,
+    /// Whether `target` is what the program prescribes (the progression's target, or last
+    /// session's set), as opposed to a stand-in: the empty bar when the plan needs a training max
+    /// the lifter has not entered. Only a prescribed target is saved with the set (#60): the
+    /// progression judges a set against its saved target exactly, so a stand-in would make any
+    /// lift count once the training max is entered.
+    pub prescribed: bool,
 }
 
 impl Step {
@@ -89,24 +93,34 @@ pub fn steps(plan: &SessionPlan, fallback_weight: Weight) -> Vec<Step> {
     let sets: Vec<_> = plan
         .exercises
         .iter()
-        .map(|planned| exercise_sets(planned, fallback_weight))
+        .map(|planned| {
+            let prescribed = matches!(planned.targets, NextTargets::Ready(_));
+            (exercise_sets(planned, fallback_weight), prescribed)
+        })
         .collect();
     let mut steps = Vec::new();
     let mut start = 0;
     while start < plan.exercises.len() {
         let end = superset_end(&plan.exercises, start);
         let group = &sets[start..end];
-        for (offset, (warmup, _)) in group.iter().enumerate() {
-            push_kind(&mut steps, start + offset, true, warmup, None);
+        for (offset, ((warmup, _), prescribed)) in group.iter().enumerate() {
+            push_kind(&mut steps, start + offset, true, warmup, None, *prescribed);
         }
         let rounds = group
             .iter()
-            .map(|(_, working)| working.len())
+            .map(|((_, working), _)| working.len())
             .max()
             .unwrap_or(0);
         for round in 0..rounds {
-            for (offset, (_, working)) in group.iter().enumerate() {
-                push_kind(&mut steps, start + offset, false, working, Some(round));
+            for (offset, ((_, working), prescribed)) in group.iter().enumerate() {
+                push_kind(
+                    &mut steps,
+                    start + offset,
+                    false,
+                    working,
+                    Some(round),
+                    *prescribed,
+                );
             }
         }
         start = end;
@@ -137,6 +151,7 @@ fn push_kind(
     warm_up: bool,
     targets: &[SetTarget],
     round: Option<usize>,
+    prescribed: bool,
 ) {
     let of = u16::try_from(targets.len()).unwrap_or(u16::MAX);
     for (index, target) in targets.iter().enumerate() {
@@ -149,6 +164,7 @@ fn push_kind(
             set_index: u16::try_from(index).unwrap_or(u16::MAX),
             of,
             target: *target,
+            prescribed,
         });
     }
 }
@@ -249,20 +265,6 @@ pub fn prefill(
     Prefill { reps, weight }
 }
 
-/// The weight stepper's step: two of the smallest plate in the user's inventory (one per side),
-/// or 2.5 kg / 5 lb without plates.
-#[must_use]
-pub fn weight_step(inventory: &PlateInventory, unit: Unit) -> Weight {
-    let smallest = inventory.stock().iter().map(|stock| stock.plate).min();
-    smallest
-        .and_then(|plate| plate.checked_mul(2).ok())
-        .filter(|step| !step.is_zero())
-        .unwrap_or_else(|| match unit {
-            Unit::Kg => Weight::from_kg(2.5).unwrap_or(Weight::ZERO),
-            Unit::Lb => Weight::from_lb(5.0).unwrap_or(Weight::ZERO),
-        })
-}
-
 /// The set to save for a step. The completion time is never before the session's start, so a
 /// clock that stepped back (or another device's) does not make the server refuse it.
 #[must_use]
@@ -283,6 +285,9 @@ pub fn logged_set(
         duration: entry.duration,
         warm_up: step.warm_up,
         completed_at: now.max(started_at),
+        // What this set was prescribed, so that the progression judges it exactly (#60); nothing
+        // when the prefill was only a stand-in (the bar, for a missing training max).
+        target: step.prescribed.then_some(step.target),
     }
 }
 
@@ -625,9 +630,7 @@ mod tests {
     use crate::api::sessions::SessionView;
     use iron_oxide_domain::program::{RepTarget, SupersetId};
     use iron_oxide_domain::progression::{ExerciseTargets, TargetSource};
-    use iron_oxide_domain::{
-        DayId, PlateStock, ProgramId, ProgramVersionId, SessionId, SessionStatus,
-    };
+    use iron_oxide_domain::{DayId, ProgramId, ProgramVersionId, SessionId, SessionStatus};
     use uuid::Uuid;
 
     fn kg(value: f64) -> Weight {
@@ -719,6 +722,7 @@ mod tests {
             duration: None,
             warm_up,
             completed_at: Timestamp::from_epoch_millis(at),
+            target: None,
         }
     }
 
@@ -790,6 +794,24 @@ mod tests {
         let steps = steps(&plan, kg(20.0));
         assert_eq!(steps.len(), 3);
         assert!(steps.iter().all(|step| step.target == target(20.0, 5)));
+        // The bar is a stand-in, not a prescription: the set is saved without a target (#60),
+        // or a training max entered while the workout is open would judge it against 20 kg.
+        assert!(steps.iter().all(|step| !step.prescribed));
+        let entry = Entry {
+            reps: Reps::new(5),
+            weight: Some(kg(60.0)),
+            duration: None,
+        };
+        let start = Timestamp::from_epoch_millis(1_000);
+        let saved = logged_set(
+            SetId::from_uuid(Uuid::from_u128(9)),
+            &steps[0],
+            &plan.exercises[0].exercise,
+            entry,
+            start,
+            start,
+        );
+        assert_eq!(saved.target, None);
     }
 
     #[test]
@@ -910,6 +932,7 @@ mod tests {
                     seconds: Seconds::new(45),
                 },
             },
+            prescribed: true,
         };
         let plank = ExerciseId::new("plank").unwrap();
         let sets = vec![logged("plank", false, 0, 10.0, 2_000)];
@@ -919,29 +942,6 @@ mod tests {
                 reps: Reps::new(1),
                 weight: None
             }
-        );
-    }
-
-    #[test]
-    fn the_weight_step_is_a_pair_of_the_smallest_plates() {
-        assert_eq!(
-            weight_step(&PlateInventory::default_for(Unit::Kg), Unit::Kg),
-            kg(2.5)
-        );
-        assert_eq!(
-            weight_step(&PlateInventory::default_for(Unit::Lb), Unit::Lb),
-            Weight::from_lb(5.0).unwrap()
-        );
-        let fives = PlateInventory::new([PlateStock {
-            plate: kg(5.0),
-            pairs: 2,
-        }])
-        .unwrap();
-        assert_eq!(weight_step(&fives, Unit::Kg), kg(10.0));
-        assert_eq!(weight_step(&PlateInventory::empty(), Unit::Kg), kg(2.5));
-        assert_eq!(
-            weight_step(&PlateInventory::empty(), Unit::Lb),
-            Weight::from_lb(5.0).unwrap()
         );
     }
 
@@ -976,6 +976,9 @@ mod tests {
             start,
         );
         assert_eq!(on_time.completed_at, Timestamp::from_epoch_millis(5_000));
+        // A planned set is saved with the target it was shown (#60).
+        assert!(steps[0].prescribed);
+        assert_eq!(on_time.target, Some(steps[0].target));
 
         let sets = vec![logged("squat", false, 0, 100.0, 9_000)];
         assert_eq!(

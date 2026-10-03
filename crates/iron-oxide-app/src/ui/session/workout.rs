@@ -227,6 +227,7 @@ pub fn Workout(
                 logged,
                 up_next: Some(flow::up_next(&steps, index, after, plan, unit)),
                 sound: state.settings.sound_enabled,
+                vibration: state.settings.vibration_enabled,
             }
             {sheet}
         };
@@ -246,7 +247,7 @@ pub fn Workout(
     let next = flow::next_line(&steps, index, next, plan, unit);
     let needs_training_max = matches!(planned.targets, NextTargets::NeedsTrainingMax { .. });
     let prefill = flow::prefill(&steps, &step, &exercise.id, &state.sets);
-    let weight_step = flow::weight_step(&state.settings.plate_inventory, unit);
+    let weight_step = state.settings.weight_step(unit);
     let current_edit = edit().filter(|edit| edit.step == step).unwrap_or(Edit {
         step,
         reps: i64::from(prefill.reps.get()),

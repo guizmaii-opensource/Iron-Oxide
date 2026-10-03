@@ -131,7 +131,6 @@ impl PgSessionStore {
     }
 
     /// Deletes every session of `user` ("sign out everywhere", account deletion).
-    #[allow(dead_code, reason = "used by account deletion (#22)")]
     pub async fn delete_all_for_user(&self, user: UserId) -> Result<u64, sqlx::Error> {
         Ok(
             sqlx::query!("DELETE FROM sessions WHERE user_id = $1", user.as_uuid())

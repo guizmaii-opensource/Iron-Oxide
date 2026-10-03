@@ -7,8 +7,8 @@
 
 use dioxus::prelude::*;
 use iron_oxide_domain::{
-    DayId, ExerciseId, Lift, LoggedSet, ProgramId, ProgramVersionId, SeriesPoint, SessionId,
-    SessionStatus, Volume, Weight, time::Timestamp,
+    DayId, ExerciseId, Lift, LoggedSet, ProgramId, ProgramVersionId, SessionId, SessionStatus,
+    Volume, Weight, time::Timestamp,
 };
 use serde::{Deserialize, Serialize};
 
@@ -72,12 +72,23 @@ pub struct SessionSummary {
     /// The version number the session was run from (1, 2, ...).
     pub program_version: u32,
     pub day_id: DayId,
+    /// The day's name in the session's own program version, as it was when the session ran (a
+    /// later version renaming the day does not rename it here). `None` if that version has no
+    /// such day.
+    pub day_name: Option<String>,
     pub status: SessionStatus,
     pub started_at: Timestamp,
     /// `None` only for a session still in progress (never in the history list).
     pub finished_at: Option<Timestamp>,
     /// Sets logged that are not warm-ups.
     pub working_sets: u32,
+    /// Weight × reps of the working sets (warm-ups, body-weight and timed sets add nothing), as
+    /// the end-of-session summary counts it.
+    pub volume: Volume,
+    /// Whether the session set a personal record (heaviest weight, best e1RM or most reps at a
+    /// weight), exactly as its end-of-session summary reports them: only completed sessions,
+    /// against the completed sessions started before it.
+    pub set_pr: bool,
 }
 
 /// One session with its sets, grouped by exercise.
@@ -110,12 +121,24 @@ pub struct SeriesKey {
     pub session_id: SessionId,
 }
 
+/// One session of an exercise's chart series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExercisePoint {
+    pub key: SeriesKey,
+    /// The heaviest working set (then the most reps).
+    pub top_set: Lift,
+    /// The best estimated one-rep max (Epley); `None` when every set has too many reps.
+    pub best_e1rm: Option<Weight>,
+    /// Weight × reps of the exercise's working sets in the session.
+    pub volume: Volume,
+}
+
 /// The chart series of one exercise: one point per ended session with a weighted working set,
 /// oldest first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExerciseSeries {
     pub exercise_id: ExerciseId,
-    pub points: Vec<SeriesPoint<SeriesKey>>,
+    pub points: Vec<ExercisePoint>,
 }
 
 /// An exercise the user has logged in an ended session.
@@ -151,8 +174,8 @@ pub async fn session_details(session_id: SessionId) -> Result<SessionDetails, Se
     Ok(history::details(&state.db, user.owner(), session_id).await?)
 }
 
-/// The chart series of one exercise: per ended session, the top set and the best e1RM. Empty when
-/// the user never logged a weighted working set of it.
+/// The chart series of one exercise: per ended session, the top set, the best e1RM and the volume.
+/// Empty when the user never logged a weighted working set of it.
 ///
 /// # Errors
 /// 422 when `exercise_id` is not a valid exercise id (a slug).

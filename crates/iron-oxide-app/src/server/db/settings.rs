@@ -43,6 +43,11 @@ pub struct UserSettings {
     /// Default rest between sets, in seconds (the domain `Seconds`).
     pub default_rest_s: u32,
     pub sound_enabled: bool,
+    /// The weight steppers' increment in kg mode, in nanograms.
+    pub kg_weight_step_ng: u64,
+    /// The weight steppers' increment in lb mode, in nanograms.
+    pub lb_weight_step_ng: u64,
+    pub vibration_enabled: bool,
 }
 
 impl UserSettings {
@@ -61,6 +66,9 @@ impl UserSettings {
             .unwrap_or(JsonValue::Null),
             default_rest_s: 120,
             sound_enabled: true,
+            kg_weight_step_ng: 2_500_000_000_000,
+            lb_weight_step_ng: 2_267_961_850_000,
+            vibration_enabled: true,
         }
     }
 }
@@ -72,7 +80,8 @@ impl UserSettings {
 /// plate inventory), not by the column defaults.
 pub async fn find(pool: &PgPool, user: UserId) -> Result<Option<UserSettings>, RepoError> {
     let row = sqlx::query!(
-        "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled
+        "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled,
+                kg_weight_step_ng, lb_weight_step_ng, vibration_enabled
          FROM user_settings WHERE user_id = $1",
         user.as_uuid()
     )
@@ -85,6 +94,9 @@ pub async fn find(pool: &PgPool, user: UserId) -> Result<Option<UserSettings>, R
             plate_inventory: row.plate_inventory,
             default_rest_s: narrow(row.default_rest_s, "user_settings.default_rest_s")?,
             sound_enabled: row.sound_enabled,
+            kg_weight_step_ng: narrow(row.kg_weight_step_ng, "user_settings.kg_weight_step_ng")?,
+            lb_weight_step_ng: narrow(row.lb_weight_step_ng, "user_settings.lb_weight_step_ng")?,
+            vibration_enabled: row.vibration_enabled,
         })
     })
     .transpose()
@@ -99,16 +111,33 @@ pub async fn save(pool: &PgPool, user: UserId, settings: &UserSettings) -> Resul
     let bar_weight_ng = i64::try_from(settings.bar_weight_ng).map_err(|_| RepoError::Invalid {
         constraint: Some("user_settings_bar_weight_ng_check".to_owned()),
     })?;
+    let step = |value: u64, constraint: &str| {
+        i64::try_from(value).map_err(|_| RepoError::Invalid {
+            constraint: Some(constraint.to_owned()),
+        })
+    };
+    let kg_weight_step_ng = step(
+        settings.kg_weight_step_ng,
+        "user_settings_kg_weight_step_ng_check",
+    )?;
+    let lb_weight_step_ng = step(
+        settings.lb_weight_step_ng,
+        "user_settings_lb_weight_step_ng_check",
+    )?;
     sqlx::query!(
         "INSERT INTO user_settings
-             (user_id, unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled)
-         VALUES ($1, $2, $3, $4, $5, $6)
+             (user_id, unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled,
+              kg_weight_step_ng, lb_weight_step_ng, vibration_enabled)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (user_id) DO UPDATE SET
              unit = EXCLUDED.unit,
              bar_weight_ng = EXCLUDED.bar_weight_ng,
              plate_inventory = EXCLUDED.plate_inventory,
              default_rest_s = EXCLUDED.default_rest_s,
              sound_enabled = EXCLUDED.sound_enabled,
+             kg_weight_step_ng = EXCLUDED.kg_weight_step_ng,
+             lb_weight_step_ng = EXCLUDED.lb_weight_step_ng,
+             vibration_enabled = EXCLUDED.vibration_enabled,
              updated_at = now()",
         user.as_uuid(),
         settings.unit.as_str(),
@@ -116,6 +145,9 @@ pub async fn save(pool: &PgPool, user: UserId, settings: &UserSettings) -> Resul
         settings.plate_inventory,
         i64::from(settings.default_rest_s),
         settings.sound_enabled,
+        kg_weight_step_ng,
+        lb_weight_step_ng,
+        settings.vibration_enabled,
     )
     .execute(pool)
     .await?;
@@ -135,6 +167,9 @@ mod tests {
             plate_inventory: json!([{"plate": 20.0, "pairs": 4}]),
             default_rest_s: u32::MAX,
             sound_enabled: false,
+            kg_weight_step_ng: 1_000_000_000_000,
+            lb_weight_step_ng: 4_535_923_700_000,
+            vibration_enabled: false,
         }
     }
 
@@ -217,6 +252,15 @@ mod tests {
             // No bar, no plates (#34).
             UserSettings {
                 bar_weight_ng: 0,
+                ..UserSettings::defaults()
+            },
+            // A zero or out-of-range weight step (#103).
+            UserSettings {
+                kg_weight_step_ng: 0,
+                ..UserSettings::defaults()
+            },
+            UserSettings {
+                lb_weight_step_ng: u64::MAX,
                 ..UserSettings::defaults()
             },
             UserSettings {

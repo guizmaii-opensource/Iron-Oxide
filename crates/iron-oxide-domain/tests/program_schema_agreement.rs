@@ -18,8 +18,8 @@
 use std::path::Path;
 
 use iron_oxide_domain::program::{
-    PROGRAM_SCHEMA_JSON, PROGRAM_SCHEMA_URL, Program, ProgramError, ValidationErrorKind as Kind,
-    builtin_programs,
+    LEGACY_PROGRAM_SCHEMA_URL, PROGRAM_SCHEMA_JSON, PROGRAM_SCHEMA_URL, Program, ProgramError,
+    ValidationErrorKind as Kind, builtin_programs,
 };
 use serde_json::{Value, json};
 
@@ -169,6 +169,8 @@ fn candidates() -> Vec<Value> {
         "https://a.b:",
         "https://a.b/<x>",
         PROGRAM_SCHEMA_URL,
+        // Documents saved before the repository moved (#104).
+        LEGACY_PROGRAM_SCHEMA_URL,
     ];
     values.extend(strings.iter().map(|s| Value::from(*s)));
     let long = [

@@ -69,6 +69,12 @@ pub enum AuthError {
 }
 
 impl AuthError {
+    /// Whether the client may simply replay the request (`503`): nothing was done.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.public().0 == 503
+    }
+
     /// The HTTP status and the message shown to the user.
     #[must_use]
     pub fn public(&self) -> (u16, &str) {

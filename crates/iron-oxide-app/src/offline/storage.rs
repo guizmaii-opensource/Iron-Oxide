@@ -3,7 +3,9 @@
 //!
 //! Every record is `{"v": <version>, "data": …}` under a key that names the user:
 //! `iron-oxide:<record>:<user id>`. A record that does not parse, or has a version this build
-//! does not read, is moved aside to `<key>:unreadable` (never deleted) and reads as missing.
+//! does not read, is moved aside to `<key>:unreadable` and reads as missing. The newest
+//! [`MAX_UNREADABLE`] records set aside are kept per key; older ones are dropped, with a warning,
+//! so a record that keeps failing cannot fill the storage.
 //! Bump the record's version when its shape changes incompatibly, and teach its reader the old
 //! one if the data is worth keeping.
 
@@ -14,7 +16,7 @@ use dioxus::logger::tracing;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::queue::{OutboxStatus, Queue};
+use super::queue::{OutboxStatus, Queue, WriteKey};
 use crate::auth::types::UserId;
 
 /// A failed storage call: storage blocked (private mode, disabled cookies) or full.
@@ -113,8 +115,10 @@ pub fn unreadable_key(key: &str) -> String {
     format!("{key}:unreadable")
 }
 
-/// How many unreadable records are kept aside per key (the oldest go first).
-const MAX_UNREADABLE: usize = 10;
+/// How many unreadable records are kept aside per key: the newest; older ones are dropped (with a
+/// warning). Ten is plenty to recover from a bad release by hand, and bounds what a record that
+/// keeps failing can take of the storage quota.
+pub const MAX_UNREADABLE: usize = 10;
 
 #[derive(Serialize, Deserialize)]
 struct Envelope {
@@ -177,6 +181,13 @@ pub fn set_aside(storage: &dyn Storage, key: &str, data: Value) {
         .unwrap_or_default();
     kept.push(data);
     let excess = kept.len().saturating_sub(MAX_UNREADABLE);
+    if excess > 0 {
+        tracing::warn!(
+            key,
+            dropped = excess,
+            "too many unreadable records, the oldest dropped"
+        );
+    }
     kept.drain(..excess);
     let stored = serde_json::to_string(&kept)
         .map_err(|error| StorageError(error.to_string()))
@@ -193,6 +204,14 @@ pub const NOT_PERSISTED_MESSAGE: &str =
 
 /// One user's outbox in storage. Every change reads the stored queue, applies the change and
 /// writes it back in the same synchronous step, so writes queued by another tab are kept.
+///
+/// That step is not a cross-tab lock: `localStorage` has none, and the Web Locks API is
+/// asynchronous while [`super::Outbox::enqueue`] stores the write before it returns. Two tabs
+/// writing at the very same moment can overwrite each other's change. Each tab keeps its own copy,
+/// though, and every load (a change, a refresh, the other tab's `storage` event) merges it with
+/// the stored one and writes back the entries the stored one lost. An overwritten write is
+/// therefore stored again as soon as its tab next looks at the queue; it is lost only if that tab
+/// is closed first.
 ///
 /// When storage fails (blocked, full, or only the memory fallback is there), the queue lives on
 /// in memory: changes keep working for as long as the page is open, and
@@ -228,14 +247,32 @@ impl QueueStore {
     }
 
     /// The current queue: the stored one, or the memory copy while storage fails. Entries that do
-    /// not decode are moved aside.
+    /// not decode are moved aside. Entries the stored copy lost (another tab overwrote it with a
+    /// copy read just before this tab's change) are stored again.
     pub fn load(&mut self, storage: &dyn Storage) -> &Queue {
         match read(storage, &self.key, Self::VERSION) {
             Ok(stored) => {
                 let (queue, unreadable) = stored.map(Queue::from_json).unwrap_or_default();
+                let stored_keys: Vec<WriteKey> =
+                    queue.entries().map(|entry| entry.write.key()).collect();
                 // Always merged: the stored copy may be newer (another tab) or older (this tab
                 // could not save); revisions and tombstones decide (`Queue::merge`).
                 self.mirror = Queue::merge(std::mem::take(&mut self.mirror), queue);
+                // Only lost entries are written back, not every difference: two tabs whose retry
+                // states tie would otherwise keep overwriting each other through `storage`
+                // events. The set of entries only grows until a tombstone removes one, so this
+                // settles.
+                let lost = self
+                    .mirror
+                    .entries()
+                    .any(|entry| !stored_keys.contains(&entry.write.key()));
+                if lost && unreadable.is_empty() {
+                    tracing::info!(
+                        key = self.key,
+                        "outbox entries lost by another tab, stored again"
+                    );
+                    self.save(storage);
+                }
                 if !unreadable.is_empty() {
                     tracing::warn!(
                         key = self.key,
@@ -272,8 +309,12 @@ impl QueueStore {
     #[must_use]
     pub fn status(&self) -> OutboxStatus {
         let mut status = self.mirror.status();
-        if self.not_persisted && status.pending_count > 0 && status.last_error.is_none() {
-            status.last_error = Some(NOT_PERSISTED_MESSAGE.to_owned());
+        if self.not_persisted && status.pending_count > 0 {
+            // Both: why the writes are not delivered, and that closing the page loses them.
+            status.last_error = Some(match status.last_error.take() {
+                Some(error) => format!("{error} {NOT_PERSISTED_MESSAGE}"),
+                None => NOT_PERSISTED_MESSAGE.to_owned(),
+            });
         }
         status
     }
@@ -347,14 +388,18 @@ mod tests {
             serde_json::from_str(&storage.get("k:unreadable").unwrap().unwrap()).unwrap();
         assert_eq!(aside.len(), 2);
         assert_eq!(aside[0], Value::String("{not json".to_owned()));
-        // Bounded.
-        for _ in 0..20 {
-            storage.set("k", "x").unwrap();
+        // Bounded: the newest are kept, the oldest dropped (#104).
+        for index in 0..20 {
+            storage.set("k", &format!("x{index}")).unwrap();
             assert_eq!(read(&storage, "k", 1), Ok(None));
         }
         let aside: Vec<Value> =
             serde_json::from_str(&storage.get("k:unreadable").unwrap().unwrap()).unwrap();
+        let newest: Vec<Value> = (10..20)
+            .map(|index| Value::String(format!("x{index}")))
+            .collect();
         assert_eq!(aside.len(), MAX_UNREADABLE);
+        assert_eq!(aside, newest);
     }
 
     #[test]
@@ -430,6 +475,80 @@ mod tests {
                 .pending_count,
             3
         );
+    }
+
+    #[test]
+    fn a_delivery_error_does_not_hide_the_not_saved_warning() {
+        let storage = MemoryStorage::default();
+        let mut store = QueueStore::new(user());
+        let session = SessionId::new_v7();
+        store.update(&storage, |queue| queue.enqueue(start(session), at(0)));
+        storage.set_full(true);
+        let rejected = Failure::Rejected {
+            message: "This session has already ended.".to_owned(),
+        };
+        store.update(&storage, |queue| {
+            queue.on_failure(&start(session), rejected, at(0), 0.5, &Backoff::DEFAULT);
+        });
+        // Both: why it is not delivered, and that it is not on the device either (#104).
+        assert_eq!(
+            store.status().last_error,
+            Some(format!(
+                "This session has already ended. {NOT_PERSISTED_MESSAGE}"
+            ))
+        );
+        let retry = Failure::Retry {
+            message: "Cannot reach the server.".to_owned(),
+            retry_after: None,
+        };
+        let mut other = QueueStore::new(user());
+        other.update(&storage, |queue| queue.enqueue(start(session), at(0)));
+        other.update(&storage, |queue| {
+            queue.on_failure(&start(session), retry, at(0), 0.5, &Backoff::DEFAULT);
+        });
+        assert_eq!(
+            other.status().last_error,
+            Some(format!("Cannot reach the server. {NOT_PERSISTED_MESSAGE}"))
+        );
+    }
+
+    #[test]
+    fn an_entry_another_tab_overwrote_is_stored_again() {
+        let storage = MemoryStorage::default();
+        let mut tab_a = QueueStore::new(user());
+        let session = SessionId::new_v7();
+        let (from_a, from_b) = (start(session), set(session, 0));
+        // Tab B read the (empty) queue just before tab A stored its write, and stores its own
+        // change on top of that stale read: A's write is gone from storage.
+        let mut stale_b = Queue::default();
+        tab_a.update(&storage, |queue| queue.enqueue(from_a.clone(), at(0)));
+        stale_b.enqueue(from_b.clone(), at(1));
+        write(
+            &storage,
+            tab_a.key(),
+            QueueStore::VERSION,
+            stale_b.to_json().unwrap(),
+        )
+        .unwrap();
+        let stored = |storage: &MemoryStorage| -> Vec<Write> {
+            QueueStore::new(user())
+                .load(storage)
+                .entries()
+                .map(|entry| entry.write.clone())
+                .collect()
+        };
+        assert_eq!(stored(&storage), vec![from_b.clone()]);
+
+        // B's write fires a `storage` event in A, which reloads: A's write is stored again.
+        tab_a.load(&storage);
+        assert_eq!(stored(&storage), vec![from_a, from_b]);
+
+        // Settled: loading again, in either tab, writes nothing more.
+        let raw = storage.get(tab_a.key()).unwrap();
+        let mut tab_b = QueueStore::new(user());
+        tab_b.load(&storage);
+        tab_a.load(&storage);
+        assert_eq!(storage.get(tab_a.key()).unwrap(), raw);
     }
 
     #[test]
