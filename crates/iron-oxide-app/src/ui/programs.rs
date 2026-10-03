@@ -5,9 +5,14 @@
 //! Everything shown from a program document, and every problem the server reports about an
 //! uploaded one, is rendered as text nodes: those texts are the user's own and may contain markup.
 //!
+//! Programs can also be written by the user's own AI assistant ([`ai`], #108): the same upload,
+//! with the document pasted from the assistant's answer.
+//!
 //! Copies and new-program uploads carry a client `creation_id` (UUIDv7). It is kept until the
 //! request succeeds, so retrying after a lost answer returns the program the first attempt
 //! created instead of a second one (which would also take a second slot of the plan's quota).
+
+mod ai;
 
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -19,6 +24,7 @@ use iron_oxide_domain::program::{
 use iron_oxide_domain::time::Timestamp;
 use iron_oxide_domain::{CreationId, ProgramId, Unit};
 
+use self::ai::{AiFlow, AiState};
 use super::components::{Button, ButtonVariant, Card, Chip, EmptyState, LoadingState};
 use super::errors::{BannerKind, Errors, use_errors};
 use super::shell::Route;
@@ -388,12 +394,15 @@ struct Programs {
     /// The problems of the last refused upload, for the program it was for (`None`: a new one).
     problems: Signal<Option<(Option<ProgramId>, ProgramProblems)>>,
     intents: ProgramIntents,
+    /// Create with your AI: the pasted answer, its check and what was saved.
+    ai: AiState,
     errors: Errors,
 }
 
 impl Programs {
     fn open(self, screen: Screen) {
         self.clear_notices();
+        self.ai.reset();
         if try_set(self.screen, screen) {
             scroll_to_top();
         }
@@ -513,6 +522,7 @@ pub fn ProgramsPage() -> Element {
         plan_notice: use_signal(|| None),
         problems: use_signal(|| None),
         intents: use_context::<ProgramIntents>(),
+        ai: use_hook(AiState::new),
         errors: use_errors(),
     };
     let screen = state.screen.read().clone();
@@ -645,10 +655,19 @@ fn ProgramList(state: Programs) -> Element {
             None => rsx! {
                 Card { title: "No active program",
                     p { class: "io-muted",
-                        "Copy a built-in program below, or upload your own, then make it active."
+                        "Create one with your AI, copy a built-in program below, or upload your \
+                         own, then make it active."
                     }
                 }
             },
+        }
+
+        AiFlow {
+            state,
+            allowed: allowance.as_ref().map(|(allowed, _)| *allowed),
+            target: None,
+            current: None,
+            active: false,
         }
 
         Card { title: "Your programs",
@@ -1187,6 +1206,13 @@ fn MineDetail(state: Programs, id: ProgramId) -> Element {
                     }
                 }
             }
+        }
+        AiFlow {
+            state,
+            allowed: allowance.as_ref().map(|(allowed, _)| *allowed),
+            target: Some(id),
+            current: data_.detail.document.to_json_pretty().ok(),
+            active,
         }
         UploadCard { state, allowance, target: Some(id) }
     }

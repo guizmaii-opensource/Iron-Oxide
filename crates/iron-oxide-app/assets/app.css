@@ -1431,6 +1431,57 @@ a.io-chip {
   font-weight: 700;
 }
 
+/* --- Create with your AI (#108) -------------------------------------------------------------- */
+
+/* The flow's card: the accent edge makes it the screen's first call to action. */
+.io-ai {
+  border-color: var(--io-accent);
+}
+
+.io-ai-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.io-ai-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.io-ai-buttons .io-button {
+  width: 100%;
+}
+
+/* A multi-line field, in 16 px text: iOS zooms into fields with smaller text. */
+.io-textarea {
+  display: block;
+  min-height: 140px;
+  padding: 12px 14px;
+  font-family: var(--io-font-mono);
+  font-size: 16px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.io-ai-prompt summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--io-tap);
+  color: var(--io-accent-text);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.io-ai-prompt .io-textarea {
+  min-height: 240px;
+}
+
+.io-ai-preview h2 {
+  overflow-wrap: anywhere;
+}
+
 /* --- Workout session (#28) -------------------------------------------------------------------- */
 
 .io-session {

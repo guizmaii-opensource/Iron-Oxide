@@ -13,7 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use iron_oxide_domain::program::{
-    PROGRAM_SCHEMA_JSON, Program, ProgramError, ValidationErrorKind, builtin_programs, limits,
+    AI_PROMPT, AI_PROMPT_SCHEMA_URL, PROGRAM_SCHEMA_JSON, Program, ProgramError,
+    ValidationErrorKind, builtin_programs, extract_json, limits,
 };
 use serde_json::Value;
 
@@ -76,6 +77,64 @@ fn builtin_programs_round_trip_and_match_the_schema() {
         assert_eq!(schema_errors(&validator, &written), Vec::<String>::new());
         assert_eq!(Program::from_json(&written).unwrap(), *builtin.program());
     }
+}
+
+/// The files in `programs/examples/` with this extension, sorted.
+fn examples(extension: &str) -> Vec<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../programs/examples");
+    let mut paths: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == extension))
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "no .{extension} in {}", dir.display());
+    paths
+}
+
+/// The programs written by an AI assistant following the prompt (#108) are valid, and the raw
+/// answers they came in give the same program once the JSON is taken out of them.
+#[test]
+fn ai_written_examples_are_valid_and_extracted_from_the_raw_answers() {
+    let validator = schema_validator();
+    for path in examples("json") {
+        let json = fs::read_to_string(&path).unwrap();
+        let program = Program::from_json(&json)
+            .unwrap_or_else(|error| panic!("{}:\n{error}", path.display()));
+        assert_eq!(
+            schema_errors(&validator, &json),
+            Vec::<String>::new(),
+            "{}",
+            path.display()
+        );
+        let answer = path.with_extension("answer.txt");
+        let answer = fs::read_to_string(&answer)
+            .unwrap_or_else(|_| panic!("{} is missing", answer.display()));
+        let extracted = extract_json(&answer).unwrap();
+        assert_eq!(Program::from_json(extracted).unwrap(), program);
+    }
+}
+
+/// The prompt names the schema and its example is a valid program: the lines from the first
+/// `{` alone on its line to the next `}` alone on its line.
+#[test]
+fn the_ai_prompt_names_the_schema_and_its_example_is_valid() {
+    assert!(AI_PROMPT.contains(AI_PROMPT_SCHEMA_URL));
+    // No code-host URL: the prompt is shown to users and on the website.
+    assert!(!AI_PROMPT.to_lowercase().contains("github"), "{AI_PROMPT}");
+    let lines: Vec<&str> = AI_PROMPT.lines().collect();
+    let start = lines.iter().position(|line| *line == "{").unwrap();
+    let end = start + lines[start..].iter().position(|line| *line == "}").unwrap();
+    let example = lines[start..=end].join("\n");
+    let program = Program::from_json(&example).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        schema_errors(&schema_validator(), &example),
+        Vec::<String>::new()
+    );
+    assert_eq!(program.rotation.len(), program.days.len());
+    // The prompt asks for documents without `$schema`, and they are valid.
+    assert!(!example.contains("$schema"));
+    assert_eq!(program.schema, None);
 }
 
 fn check_snapshot(path: &Path, actual: &str) {

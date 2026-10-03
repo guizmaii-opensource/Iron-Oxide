@@ -1,0 +1,307 @@
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/fe2o3-labs/Iron-Oxide/main/schemas/program.schema.json",
+  "schema_version": 1,
+  "name": "Home Gym Upper/Lower Strength",
+  "description": "Four sessions a week (lower, upper, lower, upper), about 60 to 70 minutes each. The focus is strength on squat, bench and overhead press, with extra volume for muscle. There are no floor deadlifts or dips: hip hinging is done with Romanian deadlifts and hip thrusts to spare your lower back, and pressing avoids dips for your left shoulder. Suggested week: Mon A, Tue B, Thu C, Fri D, but the app simply repeats the rotation A, B, C, D. Starting loads are deliberately 10 to 15 percent below what you told me you can do. Adjust them in the first session: if everything felt easy with 2 or more reps left, add a little weight. Barbell lifts add 2.5 kg once every set hits its reps. Dumbbell weights are per dumbbell. If a lift fails three sessions in a row the app lowers the weight by 10 percent. Stop any exercise that causes sharp pain in your lower back or left shoulder and swap it for an easier variation.",
+  "days": [
+    {
+      "id": "a",
+      "name": "Day A - Lower 1",
+      "exercises": [
+        {
+          "id": "back-squat",
+          "name": "Back squat",
+          "work": { "reps": { "sets": 5, "reps": 5 } },
+          "load": { "kg": 70 },
+          "rest": 150,
+          "warmup": [
+            { "sets": 2, "reps": 5, "load": { "kg": 20 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 60 } },
+            { "reps": 2, "load": { "percent_of_working_weight": 80 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Set the safeties just below your bottom position. Start light: you squatted 80 kg for 5x5, so 70 kg leaves room. Adjust in the first session. Keep your torso braced and avoid rounding your lower back at the bottom."
+        },
+        {
+          "id": "romanian-deadlift",
+          "name": "Romanian deadlift",
+          "work": { "reps": { "sets": 3, "reps": 8 } },
+          "load": { "kg": 60 },
+          "rest": 120,
+          "tempo": "3-0-1-0",
+          "warmup": [
+            { "reps": 8, "load": { "percent_of_working_weight": 50 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Hinge at the hips with a flat back, bar close to your legs, and lower only to mid-shin or where your back stays neutral. Do not go to the floor. Stop the set if your lower back gets cranky. Adjust the weight in the first session."
+        },
+        {
+          "id": "dumbbell-split-squat",
+          "name": "Dumbbell split squat",
+          "work": { "reps": { "sets": 3, "reps": { "min": 8, "max": 12 } } },
+          "load": { "kg": 10 },
+          "rest": 90,
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Weight is per dumbbell. Reps are per leg. Rear foot on the bench if you like. Adjust the weight in the first session."
+        },
+        {
+          "id": "hanging-knee-raise",
+          "name": "Hanging knee raise",
+          "work": { "reps": { "sets": 3, "reps": { "min": 8, "max": 15 } } },
+          "rest": 60,
+          "notes": "Hang from the pull-up bar and raise your knees toward your chest without swinging. If the shoulder complains, do lying leg raises instead."
+        },
+        {
+          "id": "plank",
+          "name": "Plank",
+          "work": { "hold": { "sets": 3, "seconds": 40 } },
+          "rest": 45,
+          "notes": "Ribs down, glutes tight. Stop when your form breaks."
+        }
+      ]
+    },
+    {
+      "id": "b",
+      "name": "Day B - Upper 1",
+      "exercises": [
+        {
+          "id": "bench-press",
+          "name": "Bench press",
+          "work": { "reps": { "sets": 5, "reps": 5 } },
+          "load": { "kg": 52.5 },
+          "rest": 150,
+          "warmup": [
+            { "sets": 2, "reps": 8, "load": { "kg": 20 } },
+            { "reps": 4, "load": { "percent_of_working_weight": 65 } },
+            { "reps": 2, "load": { "percent_of_working_weight": 85 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Start about 10 percent under your 60 kg. Use a moderate grip, shoulder blades pinched, and stop if your left shoulder hurts. Use the rack safeties or the J-hooks since you train alone."
+        },
+        {
+          "id": "barbell-row",
+          "name": "Barbell row",
+          "work": { "reps": { "sets": 4, "reps": { "min": 6, "max": 10 } } },
+          "load": { "kg": 40 },
+          "rest": 120,
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Hinge to about 45 degrees, flat back, pull to the lower ribs. If your lower back tires, lower the weight or support your torso by resting your head on the bench. Adjust in the first session."
+        },
+        {
+          "id": "pull-up",
+          "name": "Pull-up",
+          "work": { "reps": { "sets": 3, "reps": { "min": 3, "max": 10 } } },
+          "rest": 120,
+          "notes": "Stop each set 1 rep before failure. If you cannot do 3, use a band or slow negatives from a bench."
+        },
+        {
+          "id": "dumbbell-curl",
+          "name": "Dumbbell curl",
+          "work": { "reps": { "sets": 3, "reps": { "min": 10, "max": 15 } } },
+          "load": { "kg": 10 },
+          "rest": 30,
+          "superset": "a",
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Weight is per dumbbell. Superset with the triceps extension. Adjust the weight in the first session."
+        },
+        {
+          "id": "dumbbell-triceps-extension",
+          "name": "Lying dumbbell triceps extension",
+          "work": { "reps": { "sets": 3, "reps": { "min": 10, "max": 15 } } },
+          "load": { "kg": 8 },
+          "rest": 90,
+          "superset": "a",
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Weight is per dumbbell, lying on the bench with a neutral grip. This replaces dips. Keep elbows pointed at the ceiling and stop if the left shoulder hurts."
+        }
+      ]
+    },
+    {
+      "id": "c",
+      "name": "Day C - Lower 2",
+      "exercises": [
+        {
+          "id": "front-squat",
+          "name": "Front squat",
+          "work": { "reps": { "sets": 4, "reps": 6 } },
+          "load": { "kg": 45 },
+          "rest": 150,
+          "warmup": [
+            { "sets": 2, "reps": 5, "load": { "kg": 20 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 70 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Clean grip or crossed arms, elbows high. Easier on the lower back than a heavy back squat. If it feels awkward, do a lighter back squat instead. Adjust the weight in the first session."
+        },
+        {
+          "id": "hip-thrust",
+          "name": "Barbell hip thrust",
+          "work": { "reps": { "sets": 4, "reps": { "min": 8, "max": 12 } } },
+          "load": { "kg": 60 },
+          "rest": 90,
+          "warmup": [
+            { "reps": 8, "load": { "percent_of_working_weight": 50 } }
+          ],
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Upper back on the bench, pad the bar, chin tucked, squeeze the glutes at the top without arching your lower back. Builds the hips with little spinal load. Adjust the weight in the first session."
+        },
+        {
+          "id": "dumbbell-goblet-squat",
+          "name": "Dumbbell goblet squat",
+          "work": { "reps": { "sets": 3, "reps": { "min": 10, "max": 15 } } },
+          "load": { "kg": 20 },
+          "rest": 90,
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Hold one dumbbell at your chest. Slow 2-second descent. Adjust the weight in the first session."
+        },
+        {
+          "id": "dumbbell-calf-raise",
+          "name": "Single-leg dumbbell calf raise",
+          "work": { "reps": { "sets": 3, "reps": { "min": 10, "max": 15 } } },
+          "load": { "kg": 12 },
+          "rest": 60,
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "One dumbbell in the hand on the working side, toes on a plate. Reps are per leg. Full stretch at the bottom."
+        },
+        {
+          "id": "side-plank",
+          "name": "Side plank",
+          "work": { "hold": { "sets": 3, "seconds": 30 } },
+          "rest": 45,
+          "notes": "Each set is per side. Keep your hips high and in line with your body."
+        }
+      ]
+    },
+    {
+      "id": "d",
+      "name": "Day D - Upper 2",
+      "exercises": [
+        {
+          "id": "overhead-press",
+          "name": "Overhead press",
+          "work": { "reps": { "sets": 4, "reps": 5 } },
+          "load": { "kg": 35 },
+          "rest": 150,
+          "warmup": [
+            { "sets": 2, "reps": 6, "load": { "kg": 20 } },
+            { "reps": 3, "load": { "percent_of_working_weight": 75 } }
+          ],
+          "progression": {
+            "add_when_top_of_range": {
+              "increment": { "kg": 2.5 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Start 5 kg under your 40 kg because of the left shoulder. Glutes tight, ribs down, bar path close to the face. If the shoulder hurts, replace with a landmine-style or dumbbell press with a neutral grip and lower the weight."
+        },
+        {
+          "id": "chin-up",
+          "name": "Chin-up",
+          "work": { "reps": { "sets": 3, "reps": { "min": 3, "max": 10 } } },
+          "rest": 120,
+          "notes": "Underhand shoulder-width grip. Stop 1 rep before failure. Use a band or negatives if you cannot do 3."
+        },
+        {
+          "id": "dumbbell-bench-press",
+          "name": "Dumbbell bench press",
+          "work": { "reps": { "sets": 3, "reps": { "min": 8, "max": 12 } } },
+          "load": { "kg": 18 },
+          "rest": 90,
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Weight is per dumbbell. Elbows about 45 degrees from the body, neutral or semi-neutral grip if it feels better on the shoulder. Adjust the weight in the first session."
+        },
+        {
+          "id": "one-arm-dumbbell-row",
+          "name": "One-arm dumbbell row",
+          "work": { "reps": { "sets": 3, "reps": { "min": 8, "max": 12 } } },
+          "load": { "kg": 20 },
+          "rest": 90,
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Hand and knee on the bench to support your back. Reps are per arm. Adjust the weight in the first session."
+        },
+        {
+          "id": "lateral-raise",
+          "name": "Dumbbell lateral raise",
+          "work": { "reps": { "sets": 3, "reps": { "min": 12, "max": 15 } } },
+          "load": { "kg": 6 },
+          "rest": 60,
+          "progression": {
+            "double_progression": {
+              "increment": { "kg": 2 },
+              "deload_after_failures": { "failures": 3, "percent": 10 }
+            }
+          },
+          "notes": "Weight is per dumbbell. Raise only to shoulder height, with a slight bend in the elbows. Skip it if the left shoulder is sore that day."
+        }
+      ]
+    }
+  ],
+  "rotation": ["a", "b", "c", "d"]
+}
+```
