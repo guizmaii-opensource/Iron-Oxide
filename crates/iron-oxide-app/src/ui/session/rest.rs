@@ -56,6 +56,7 @@ pub fn RestScreen(
     logged: String,
     up_next: Option<(String, String)>,
     sound: bool,
+    vibration: bool,
 ) -> Element {
     let mut rest = rest;
     let mut now = use_signal(platform::now);
@@ -75,7 +76,7 @@ pub fn RestScreen(
                 TimerAlert::Warning => Cue::Warning,
                 TimerAlert::Finished => Cue::Finished,
             };
-            platform::announce(cue, sound);
+            platform::announce(cue, sound, vibration);
             alert.set(Some(fired));
         }
         if observed != current {

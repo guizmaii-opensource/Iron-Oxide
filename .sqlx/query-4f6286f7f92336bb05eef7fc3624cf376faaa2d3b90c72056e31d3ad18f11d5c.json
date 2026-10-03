@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, v.program_id, p.name AS program_name, s.program_version_id,\n                  v.version AS program_version, s.day_id, s.status, s.started_at, s.finished_at,\n                  (SELECT count(*) FROM workout_sets st\n                   WHERE st.user_id = s.user_id AND st.session_id = s.id AND NOT st.warmup)\n                      AS \"working_sets!\"\n           FROM workout_sessions s\n           JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id\n           JOIN programs p ON p.id = v.program_id AND p.user_id = s.user_id\n           WHERE s.user_id = $1 AND s.id = $2",
+  "query": "SELECT s.id, v.program_id, p.name AS program_name, s.program_version_id,\n                  v.version AS program_version, s.day_id,\n                  (SELECT d ->> 'name' FROM jsonb_array_elements(v.document -> 'days') d\n                   WHERE d ->> 'id' = s.day_id LIMIT 1) AS day_name,\n                  s.status, s.started_at, s.finished_at,\n                  (SELECT count(*) FROM workout_sets st\n                   WHERE st.user_id = s.user_id AND st.session_id = s.id AND NOT st.warmup)\n                      AS \"working_sets!\"\n           FROM workout_sessions s\n           JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id\n           JOIN programs p ON p.id = v.program_id AND p.user_id = s.user_id\n           WHERE s.user_id = $1 AND s.id = $2",
   "describe": {
     "columns": [
       {
@@ -35,21 +35,26 @@
       },
       {
         "ordinal": 6,
-        "name": "status",
+        "name": "day_name",
         "type_info": "Text"
       },
       {
         "ordinal": 7,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "finished_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "working_sets!",
         "type_info": "Int8"
       }
@@ -67,11 +72,12 @@
       false,
       false,
       false,
+      null,
       false,
       false,
       true,
       null
     ]
   },
-  "hash": "433fcd05bac7f91411084a14d0548353df1777356083e0a347b549ddd46e88f4"
+  "hash": "4f6286f7f92336bb05eef7fc3624cf376faaa2d3b90c72056e31d3ad18f11d5c"
 }

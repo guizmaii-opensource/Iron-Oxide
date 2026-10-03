@@ -287,29 +287,44 @@ fn judge_weighted(session: &Judgeable<'_>, fallback: Weight) -> (SessionVerdict,
     (verdict, reached, base)
 }
 
-/// Judges a session under the training max rule: only prescribed working sets at least
-/// `at_least` count.
-fn judge_at_least(session: &Judgeable<'_>, at_least: Weight) -> SessionVerdict {
+/// Judges a session under the training max rule: only prescribed working sets at least as heavy
+/// as what they were prescribed count. A set logged with a weighted target
+/// ([`WorkingSet::target`]) counts when it is at least that target's weight, exactly; a set logged
+/// without one (before #60), or with a weightless target (never a training max prescription, so
+/// not one to trust: any lift would beat it), when it is at least `legacy_at_least` (the
+/// [`training_max_threshold`]).
+fn judge_at_least(session: &Judgeable<'_>, legacy_at_least: Weight) -> SessionVerdict {
     let reps = prescribed_sets(session.sets, session.prescribed)
         .into_iter()
-        .filter(|set| set.weight.unwrap_or(Weight::ZERO) >= at_least)
+        .filter(|set| {
+            let at_least = set
+                .target
+                .and_then(|target| target.weight)
+                .unwrap_or(legacy_at_least);
+            set.weight.unwrap_or(Weight::ZERO) >= at_least
+        })
         .map(|set| set.reps)
         .collect();
     verdict(reps, session.prescribed, session.target).0
 }
 
-/// How far below the exact prescribed weight a training max session's sets may be and still
-/// count: half of [`ProgressionSettings::max_step`], whatever the settings.
-fn tolerance() -> Weight {
-    Weight::from_nanograms(ProgressionSettings::max_step().as_nanograms() / 2)
-        .unwrap_or(Weight::ZERO)
+/// The largest step the settings allowed before #60, in nanograms: 2.5 kg. Every set logged
+/// without a target was shown a weight rounded to a step at most this large.
+const LEGACY_MAX_STEP_NANOGRAMS: u64 = 2_500_000_000_000;
+
+/// How far below the exact prescribed weight a training max set logged **without a target**
+/// (before #60) may be and still count: half of the legacy largest step, 1.25 kg, whatever the
+/// settings. Any target shown then (rounded to the nearest step of at most 2.5 kg) is within it.
+fn legacy_tolerance() -> Weight {
+    Weight::from_nanograms(LEGACY_MAX_STEP_NANOGRAMS / 2).unwrap_or(Weight::ZERO)
 }
 
-/// The lightest weight that counts for a past training max session: the exact weight its
-/// prescription asked for (a percentage of the training max at that point of the replay, or a
-/// fixed weight), less the [`tolerance`]. It depends only on that session and the replayed
-/// training max, never on the current settings. Near [`Weight::MAX`], where the app rounds
-/// targets down instead, it is lowered so that any target the app could have shown still counts.
+/// The lightest weight that counts, for a past training max session's sets logged without a
+/// target (before #60): the exact weight its prescription asked for (a percentage of the training
+/// max at that point of the replay, or a fixed weight), less the [`legacy_tolerance`]. It depends
+/// only on that session and the replayed training max, never on the current settings. Near
+/// [`Weight::MAX`], where the app rounds targets down instead, it is lowered so that any target
+/// the app could have shown still counts.
 fn training_max_threshold(prescription: &Prescription, training_max: Weight) -> Weight {
     let exact = match prescription.load {
         Some(Load::PercentOfTrainingMax(percent)) => {
@@ -318,8 +333,9 @@ fn training_max_threshold(prescription: &Prescription, training_max: Weight) -> 
         Some(Load::Weight(weight)) => weight.weight(),
         None => Weight::ZERO,
     };
-    let below_cap = Weight::MAX.saturating_sub(ProgressionSettings::max_step());
-    exact.saturating_sub(tolerance()).min(below_cap)
+    let legacy_max_step = Weight::from_nanograms(LEGACY_MAX_STEP_NANOGRAMS).unwrap_or(Weight::MAX);
+    let below_cap = Weight::MAX.saturating_sub(legacy_max_step);
+    exact.saturating_sub(legacy_tolerance()).min(below_cap)
 }
 
 /// Counts a failure, and says whether it triggers a deload.
@@ -556,8 +572,9 @@ struct TrainingMaxRule {
 }
 
 /// `training_max`: replays the history on the training max, starting from the one entered.
-/// Nothing in the replay depends on the settings: sessions are judged against their own
-/// prescription with a fixed tolerance, and each step uses the rule that showed the next targets
+/// Nothing in the replay depends on the settings: sessions are judged against the target stored
+/// with each set (or, for sets logged before #60, their own prescription with a fixed tolerance),
+/// and each step uses the rule that showed the next targets
 /// (increments added exactly, deloads exact).
 fn training_max_rule(sessions: &[&PastSession], rule: &TrainingMaxRule) -> Plan {
     let (replayed, last) = replay(sessions);
@@ -1008,8 +1025,55 @@ mod tests {
     }
 
     #[test]
+    fn a_set_logged_with_its_target_is_judged_against_it_exactly() {
+        let five = RepTarget::Fixed(Reps::new(5));
+        let shown = |weight| SetTarget {
+            weight: Some(kg(weight)),
+            goal: crate::progression::SetGoal::Reps {
+                reps: Reps::new(5),
+                range: None,
+            },
+        };
+        let lifted = |weight, target| WorkingSet::new(kg(weight), Reps::new(5)).prescribed(target);
+        // 80 % of 96.75 kg is 77.4 kg; with a 5 kg step the app showed 75 kg. The legacy
+        // threshold (77.4 − 1.25 = 76.15 kg) would refuse it; the stored target accepts it.
+        let legacy = kg(76.15);
+        let as_shown = [lifted(75.0, shown(75.0)); 3];
+        assert_eq!(
+            at_least(&as_shown, 3, five, legacy),
+            SessionVerdict::Success
+        );
+        // Lighter than its own target: does not count, even within the legacy tolerance.
+        let light = [
+            lifted(80.0, shown(80.0)),
+            lifted(80.0, shown(80.0)),
+            lifted(77.5, shown(80.0)),
+        ];
+        assert_eq!(at_least(&light, 3, five, legacy), SessionVerdict::Failure);
+        // Heavier than the target counts.
+        let heavy = [lifted(82.5, shown(80.0)); 3];
+        assert_eq!(at_least(&heavy, 3, five, legacy), SessionVerdict::Success);
+        // Mixed: sets without a target (logged before #60) keep the legacy threshold.
+        let mut mixed = vec![lifted(75.0, shown(75.0)), lifted(75.0, shown(75.0))];
+        mixed.push(WorkingSet::new(kg(77.5), Reps::new(5)));
+        assert_eq!(at_least(&mixed, 3, five, legacy), SessionVerdict::Success);
+        mixed[2] = WorkingSet::new(kg(75.0), Reps::new(5));
+        assert_eq!(at_least(&mixed, 3, five, legacy), SessionVerdict::Failure);
+        // A weightless target is no training max prescription: the legacy threshold applies, so
+        // a light set does not count just because it beats "nothing".
+        let weightless = SetTarget {
+            weight: None,
+            ..shown(0.0)
+        };
+        let any = [lifted(20.0, weightless); 3];
+        assert_eq!(at_least(&any, 3, five, legacy), SessionVerdict::Failure);
+        let enough = [lifted(77.5, weightless); 3];
+        assert_eq!(at_least(&enough, 3, five, legacy), SessionVerdict::Success);
+    }
+
+    #[test]
     fn thresholds_do_not_depend_on_the_settings() {
-        assert_eq!(tolerance(), kg(1.25));
+        assert_eq!(legacy_tolerance(), kg(1.25));
         let five = RepTarget::Fixed(Reps::new(5));
         let percent = |value| prescription(3, five, Some(Load::PercentOfTrainingMax(pct(value))));
         // 65 % of 121 kg is 78.65 kg: 77.4 kg and up count.

@@ -445,6 +445,7 @@ mod tests {
             duration: None,
             warm_up,
             completed_at: Timestamp::EPOCH,
+            target: None,
         };
         assert_eq!(working_sets(&[set(true), set(false), set(false)]), 2);
     }

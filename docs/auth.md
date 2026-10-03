@@ -209,6 +209,16 @@ ceremony removes the id from the session and deletes the row in the same stateme
 The session alone could not guarantee that, since each request works on its own copy of the
 session data.
 
+A passkey finish takes its ceremony inside the transaction that does the work
+(`ceremony::complete`). A retryable failure (`503`: no pooled connection in time, a statement
+deadline, a serialization failure) rolls back the take too, so the client can replay the same
+request. Any other failure (verification, an unknown passkey, the passkey limit) still uses the
+ceremony up. What cannot be replayed is a failure once the commit has happened: saving the
+session afterwards, or the connection dropping during `COMMIT` itself (the server answers `503`,
+but the transaction may have committed, ceremony take included). The retry then gets `400`, and
+the user starts again, as on every click of the sign-in buttons; a sign-up that did commit signs
+in with the new passkey.
+
 Ceremonies expire after 5 minutes (passkeys) or 10 minutes (Google). A ceremony started by a
 signed-in user (adding a passkey, linking Google) is bound to that user, and only that user's
 session can finish it.
@@ -259,12 +269,13 @@ server-side: which check failed, and database errors.
 |---|---|---|
 | **Session fixation** | New random session id on every sign-in; old session deleted; unknown ids never adopted (the store draws a fresh id); `__Host-` cookie cannot be set by subdomains | `the_session_id_changes_on_sign_in`, `google_sign_in_creates_then_finds_the_account_by_sub` |
 | **Session theft (DB copy, XSS)** | Only SHA-256 of ids stored; `HttpOnly`; signed cookie; idle 14 d and absolute 30 d expiry; server-side sign-out | `session_ids_are_stored_hashed`, `sign_out_deletes_the_session_server_side`, `an_expired_session_is_401`, `a_session_past_the_absolute_timeout_is_401_and_deleted` |
+| **A lost or shared device still signed in** | `sign_out_everywhere` (`POST /api/auth/sign-out-everywhere`, #103) deletes every session of the user, this one included, and clears this device's cookie. It only takes access away, so it asks for no step-up. | `sign_out_everywhere_ends_every_session_of_the_user_and_only_theirs` |
 | **CSRF** | `SameSite=Lax` + `Sec-Fetch-Site`/`Origin` check on every non-safe method; state changes only via `POST` | `csrf::tests`, `cross_site_posts_are_refused_without_side_effects` |
 | **Forged billing events** (a cross-site or scripted `POST /webhooks/stripe`) | The route is outside the CSRF and session layers by design, so it must authenticate every request itself: Stripe signature (HMAC-SHA256, constant-time compare, 5-minute tolerance) and event-id deduplication, see `docs/billing.md`. Today it is a stub: it answers `501` and changes nothing, with a 256 KiB body limit | `billing::tests::stripe_deliveries_are_not_blocked_by_the_csrf_check`, `billing::tests::the_exemption_is_only_the_webhook_route`, `billing::tests::the_body_limit_is_enforced` |
 | **Login CSRF** (victim signed into the attacker's account) | Google: `state` bound to the victim's session, single-use; passkeys: the challenge lives in the victim's session | `a_forged_callback_cannot_log_the_victim_into_the_attackers_account` |
 | **Forwarded authorization URL** (attacker starts a flow, victim completes it at Google) | The callback completes only with the ceremony of its own session and matching `state`; no code is ever stored or handed to another session | `a_forwarded_sign_in_url_cannot_sign_the_attacker_in_as_the_victim`, `a_forwarded_link_url_cannot_bind_the_victims_google_to_the_attacker` |
 | **Forged callback cancelling a flow** (cross-site navigation to the callback) | The ceremony is consumed only when its own `state` comes back, `?error=` included | `a_forged_callback_cannot_cancel_a_flow_in_progress`, `googles_error_with_the_right_state_ends_the_flow` |
-| **Challenge / ceremony replay** | Ceremony consumed with `DELETE … RETURNING`, 5–10 min TTL, bound to the session (and user); WebAuthn signs the challenge; signature counter checked | `a_replayed_sign_in_is_rejected`, `two_concurrent_finishes_of_one_ceremony_cannot_both_succeed`, `concurrent_google_finishes_of_one_ceremony_cannot_both_succeed`, `a_sign_up_ceremony_is_single_use`, `a_google_ceremony_is_single_use`, `an_expired_ceremony_is_rejected` |
+| **Challenge / ceremony replay** | Ceremony consumed with `DELETE … RETURNING`, 5–10 min TTL, bound to the session (and user); WebAuthn signs the challenge; signature counter checked | `a_replayed_sign_in_is_rejected`, `two_concurrent_finishes_of_one_ceremony_cannot_both_succeed`, `concurrent_google_finishes_of_one_ceremony_cannot_both_succeed`, `a_sign_up_ceremony_is_single_use`, `a_google_ceremony_is_single_use`, `an_expired_ceremony_is_rejected`, `a_failed_verification_still_uses_up_the_ceremony` |
 | **Passkey without user verification** | UV required at registration and sign-in | `user_verification_is_required` |
 | **Account creation time leaking to authenticators** | The WebAuthn user handle is a random UUIDv4 per user, not the (UUIDv7) user id | `the_webauthn_user_handle_is_random_stable_and_not_the_user_id` |
 | **Credential/user mismatch** (assertion with another user's handle) | Lookup by credential id *and* user handle | `a_user_handle_pointing_at_another_account_is_rejected` |

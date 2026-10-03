@@ -283,6 +283,16 @@ impl AuthContext {
     pub async fn sign_out(&self) -> Result<(), AuthError> {
         Ok(self.session.flush().await?)
     }
+
+    /// Signs `user` out on every device: this session first (row and cookie), then every other
+    /// session of theirs.
+    pub async fn sign_out_everywhere(&self, user: UserId) -> Result<(), AuthError> {
+        self.session.flush().await?;
+        PgSessionStore::new(self.db().clone())
+            .delete_all_for_user(user)
+            .await?;
+        Ok(())
+    }
 }
 
 /// The signed-in user, for server functions and handlers. Rejects the request with `401`

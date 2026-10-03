@@ -28,6 +28,7 @@
 
 mod builtin;
 mod error;
+mod extract;
 mod ids;
 pub mod limits;
 mod model;
@@ -45,6 +46,7 @@ pub use error::{
     JsonPath, ParseError, PathSegment, ProgramError, ValidationError, ValidationErrorKind,
     ValidationErrors,
 };
+pub use extract::{ExtractError, MAX_PASTE_BYTES, extract_json};
 pub use ids::{BuiltinProgramId, InvalidSlug, SupersetId};
 pub use model::{Day, Deload, Exercise, Program, ProgressionRule, WarmupSet, Work};
 pub use validate::CURRENT_SCHEMA_VERSION;
@@ -61,9 +63,21 @@ pub const PROGRAM_SCHEMA_URL: &str =
 
 /// The schema URL from before the repository moved to `fe2o3-labs`. Documents stored or saved
 /// earlier may still carry it, so it is accepted when reading a `$schema` field. It is never
-/// written: a document always serialises with [`PROGRAM_SCHEMA_URL`]. This is the only place the
-/// old owner's name may appear.
+/// written: a document always serialises with [`PROGRAM_SCHEMA_URL`]. The generated schema
+/// (`schemas/program.schema.json`) accepts it too. Apart from these two, the old owner's name
+/// appears nowhere.
 pub const LEGACY_PROGRAM_SCHEMA_URL: &str = "https://raw.githubusercontent.com/guizmaii-opensource/Iron-Oxide/main/schemas/program.schema.json";
+
+/// Where the AI prompt points assistants to the schema: the copy the website publishes
+/// (iron-oxyde.com), so the prompt names no code host. The prompt tells the assistant to leave
+/// `$schema` out, which [`Program::from_json`] accepts.
+pub const AI_PROMPT_SCHEMA_URL: &str = "https://iron-oxyde.com/program.schema.json";
+
+/// The prompt a user gives their own AI assistant (ChatGPT, Claude, Gemini…) so it interviews
+/// them and writes a program in this format (#108). Plain text, versioned in
+/// `programs/ai-prompt.md`; the app and the landing page both use it. It names
+/// [`AI_PROMPT_SCHEMA_URL`] and holds a short example that passes [`Program::from_json`] (tested).
+pub const AI_PROMPT: &str = include_str!("../../../../programs/ai-prompt.md");
 
 /// The program JSON Schema, as committed in `schemas/program.schema.json`.
 pub const PROGRAM_SCHEMA_JSON: &str = include_str!("../../../../schemas/program.schema.json");

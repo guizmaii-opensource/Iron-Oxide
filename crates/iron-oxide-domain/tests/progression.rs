@@ -794,6 +794,7 @@ mod timed {
                 reps: Reps::new(1),
                 weight: None,
                 duration: Some(Seconds::new(30)),
+                target: None,
             };
             3
         ]);
@@ -821,6 +822,7 @@ mod timed {
             reps: Reps::new(1),
             weight: Some(kg(32.0)),
             duration: Some(Seconds::new(40)),
+            target: None,
         }]);
         let next = targets(&carry, &[last]);
         assert!(next.working.iter().all(|set| set.weight == Some(kg(32.0))));
@@ -852,6 +854,7 @@ mod timed {
             reps: Reps::new(6),
             weight: None,
             duration: Some(Seconds::new(180)),
+            target: None,
         }]);
         assert_eq!(targets(&sprints, &[done]).working, expected);
     }
@@ -876,6 +879,7 @@ mod timed {
             reps: Reps::new(1),
             weight: Some(kg(10.0)),
             duration: Some(Seconds::new(60)),
+            target: None,
         }]);
         let next = targets(&plank, &[done]);
         assert_eq!(next.source, TargetSource::LastPerformance);
@@ -1171,6 +1175,40 @@ mod review_cases {
             let next = ready(plan(&bench, Some(kg(121.0)), settings, &failed));
             assert_eq!(next.training_max, Some(kg(108.9)), "{settings:?}");
         }
+    }
+
+    /// #60: a lifter whose smallest plates are 2.5 kg steps by 5 kg. The target shown, 75 kg
+    /// (80 % of 96.75 kg is 77.4 kg, rounded to 5 kg), is 2.4 kg below the exact weight, beyond
+    /// the legacy 1.25 kg tolerance; logged with its target, doing it is a success.
+    #[test]
+    fn a_five_kg_step_done_as_shown_is_a_success() {
+        let settings = ProgressionSettings::new(Unit::Kg, kg(5.0)).unwrap();
+        let first = ready(plan(&bench(), Some(kg(96.75)), settings, &[]));
+        let (weight, _) = working(&first);
+        assert_eq!(weight, kg(75.0));
+        let done: Sets = first
+            .working
+            .iter()
+            .map(|target| WorkingSet::new(weight, Reps::new(5)).prescribed(*target))
+            .collect();
+        let next = ready(plan(
+            &bench(),
+            Some(kg(96.75)),
+            settings,
+            std::slice::from_ref(&done),
+        ));
+        assert_eq!(next.last_verdict, Some(SessionVerdict::Success));
+        assert_eq!(next.training_max, Some(kg(99.25)));
+        // The same sets logged without their target (before #60) fall to the legacy tolerance.
+        let legacy: Sets = done
+            .iter()
+            .map(|set| WorkingSet {
+                target: None,
+                ..*set
+            })
+            .collect();
+        let next = ready(plan(&bench(), Some(kg(96.75)), settings, &[legacy]));
+        assert_eq!(next.last_verdict, Some(SessionVerdict::Failure));
     }
 
     #[test]
@@ -1607,6 +1645,7 @@ mod history_from_logs {
             duration: None,
             warm_up: false,
             completed_at: n as i64,
+            target: None,
         }
     }
 

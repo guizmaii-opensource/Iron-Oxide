@@ -87,6 +87,8 @@ erDiagram
         bigint duration_s "NULL = not timed"
         boolean warmup
         timestamptz completed_at
+        bigint target_weight_ng "NULL = body weight or no target"
+        jsonb target_goal "SetGoal; NULL = no target recorded"
     }
 ```
 
@@ -104,7 +106,7 @@ with the sign-in `sessions` table.
 | `program_versions` | Immutable program documents | `version` is 1, 2, ... per program. A trigger rejects every `UPDATE`; there is no update path in the repository. A trigger rejects any `DELETE` that is not the cascade from a deleted user, so a version number is never freed for other content. |
 | `active_program` | The program a user trains with | Composite FK to `programs (id, user_id)`: only one of the user's own programs (never a built-in; copy it first). |
 | `workout_sessions` | A training session | Client-generated id, primary key `(user_id, id)`. `finished_at` is set exactly when the status is not `in_progress`, and not before `started_at`. |
-| `workout_sets` | A logged set | Client-generated id, the idempotency key; primary key `(user_id, id)`. |
+| `workout_sets` | A logged set | Client-generated id, the idempotency key; primary key `(user_id, id)`. `target_weight_ng` and `target_goal` (#60) are what the app prescribed for the set when it was logged; `target_goal` NULL means no target was recorded (every set logged before #60, extras, added exercises), and such sets keep the legacy judging (exact prescribed weight less 1.25 kg). Not backfilled: the target shown depended on that day's settings and training max. |
 
 ### Mapping to the domain types
 
@@ -211,9 +213,9 @@ catalog: every table with a `user_id` column, so a future table cannot be forgot
 | `programs` | `seed_builtins`, `list_builtins`, `copy_builtin` and `create` (idempotent on a `CreationId`), `get`, `list`, `rename`, `archive`, `unarchive`, `add_version` (a retried identical upload is a no-op), `list_versions`, `get_version`, `latest_version` |
 | `active_program` | `get`, `set`, `clear` |
 | `sessions` | `start` (idempotent), `finish` (idempotent), `get`, `get_in_progress`, `list` (history pages by `(started_at, id)`, optionally for one program) |
-| `history` | The history screens (#20): `page` (ended sessions, most recently finished first, paged by `(finished_at, id)` with microsecond cursors, served by the partial `workout_sessions_history_idx`), `entry` (one session with its program name, version number and working-set count), `exercise_sets` (weighted sets of one exercise in ended sessions, for the charts), `logged_exercises` |
+| `history` | The history screens (#20): `page` (ended sessions, most recently finished first, paged by `(finished_at, id)` with microsecond cursors, served by the partial `workout_sessions_history_idx`), `entry` (one session with its program name, version number, the day's name in that version and working-set count), `exercise_sets` (weighted, untimed sets of one exercise in ended sessions, for the charts), `logged_exercises` |
 | `account` | The whole account (#22): the export reads (`snapshot`, then one function per table, all scoped by the user), the import writes (insert-only: `ON CONFLICT DO NOTHING` or a lookup first, bulk `UNNEST` inserts for sessions and sets), and `delete_user` (the cascade, see below) |
-| `sets` | `upsert_idempotent`, `list_for_session`, `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
+| `sets` | `upsert_idempotent`, `list_for_session`, `list_for_sessions` (the sets of a history page, one query), `completed_for_exercise` (sets of one exercise after a time, in completed sessions of any version of a program: the progression input of #57, served by the `(user_id, exercise_id, completed_at)` index) |
 
 A user has at most one session in progress: the partial unique index
 `workout_sessions_one_in_progress_idx` on `workout_sessions (user_id) WHERE status =

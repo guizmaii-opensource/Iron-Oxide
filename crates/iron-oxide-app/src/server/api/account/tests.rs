@@ -69,6 +69,14 @@ fn set(index: u16, at: Timestamp) -> LoggedSet<Timestamp> {
         duration: None,
         warm_up: false,
         completed_at: at,
+        // What the session screen saves since #60: the target it showed.
+        target: Some(iron_oxide_domain::progression::SetTarget {
+            weight: Some(Weight::from_kg(100.0).unwrap()),
+            goal: iron_oxide_domain::progression::SetGoal::Reps {
+                reps: Reps::new(5),
+                range: None,
+            },
+        }),
     }
 }
 
@@ -95,6 +103,7 @@ async fn seed(user: &mut TestUser) {
         "/api/settings/update",
         json!({ "settings": {
             "unit": "lb", "bar_weight": 15, "default_rest": 90, "sound_enabled": false,
+            "kg_weight_step": 1.0, "lb_weight_step": 1.13398093, "vibration_enabled": false,
             "plate_inventory": [{ "plate": 20, "pairs": 2 }, { "plate": 1.25, "pairs": 1 }]
         } }),
     )
@@ -259,9 +268,9 @@ fn files_that_are_not_a_current_export_are_refused_before_parsing() {
         "This file is not an Iron Oxide export."
     );
     assert_eq!(
-        message(r#"{"format": "iron-oxide-export", "format_version": 2}"#),
-        "This export has format version 2, which this version of Iron Oxide cannot read (it \
-         reads version 1)."
+        message(r#"{"format": "iron-oxide-export", "format_version": 3}"#),
+        "This export has format version 3, which this version of Iron Oxide cannot read (it \
+         reads versions 1 to 2)."
     );
     assert_eq!(
         message(r#"{"format": "iron-oxide-export", "format_version": "1"}"#),
@@ -732,12 +741,12 @@ async fn invalid_imports_are_422_and_write_nothing(db: PgPool) {
         error.message
     };
 
-    let mut version_2 = serde_json::to_value(&valid).unwrap();
-    version_2["format_version"] = json!(2);
+    let mut version_3 = serde_json::to_value(&valid).unwrap();
+    version_3["format_version"] = json!(3);
     assert!(
-        refused(&mut c, version_2)
+        refused(&mut c, version_3)
             .await
-            .contains("format version 2")
+            .contains("format version 3")
     );
     assert_eq!(
         refused(&mut c, json!({ "hello": "world" })).await,
@@ -1538,4 +1547,71 @@ async fn an_import_and_a_concurrent_version_upload_both_succeed(db: PgPool) {
             );
         }
     }
+}
+
+// --- Format version 2 (#60) ---------------------------------------------------------------------
+
+/// Sets keep the target they were prescribed through an export and an import (format version 2).
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn set_targets_survive_an_export_and_an_import(db: PgPool) {
+    let api = TestApi::new(db.clone()).await;
+    let (mut a, mut c) = (api.user("A").await, api.user("C").await);
+    seed(&mut a).await;
+    let document = export(&mut a).await;
+    assert_eq!(document.format_version, 2);
+    let targets: Vec<_> = document
+        .sessions
+        .iter()
+        .flat_map(|session| session.sets.iter().map(|set| set.target))
+        .collect();
+    assert!(
+        !targets.is_empty() && targets.iter().all(Option::is_some),
+        "{targets:?}"
+    );
+    import(&mut c, &document).await.unwrap();
+    assert_eq!(training(&export(&mut c).await), training(&document));
+    assert_eq!(
+        import(&mut c, &document).await.unwrap(),
+        ImportSummary::default()
+    );
+}
+
+/// An export written before #60 (format version 1, no set targets) still imports: its sets have no
+/// target, as if logged then.
+#[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+#[ignore = "needs Postgres"]
+async fn a_version_1_export_still_imports(db: PgPool) {
+    let api = TestApi::new(db.clone()).await;
+    let (mut a, mut c) = (api.user("A").await, api.user("C").await);
+    seed(&mut a).await;
+    let mut old = serde_json::to_value(export(&mut a).await).unwrap();
+    old["format_version"] = json!(1);
+    for session in old["sessions"].as_array_mut().unwrap() {
+        for set in session["sets"].as_array_mut().unwrap() {
+            set.as_object_mut().unwrap().remove("target");
+        }
+    }
+    assert!(!old.to_string().contains("\"target\""));
+    let summary: ImportSummary = c
+        .call(IMPORT, json!({ "document": old.to_string() }))
+        .await
+        .unwrap();
+    assert_eq!((summary.sessions, summary.sets), (2, 4));
+    let after = export(&mut c).await;
+    assert!(
+        after
+            .sessions
+            .iter()
+            .flat_map(|session| &session.sets)
+            .all(|set| set.target.is_none())
+    );
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workout_sets WHERE user_id = $1 AND target_goal IS NULL",
+    )
+    .bind(c.id.as_uuid())
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(stored, 4);
 }

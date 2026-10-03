@@ -179,7 +179,8 @@ pub enum LastSession {
     /// No session has ended yet.
     None,
     Loaded {
-        summary: SessionSummary,
+        /// Boxed: a summary is much larger than the other variants.
+        summary: Box<SessionSummary>,
         /// The day's name in the session's own version, when known.
         day_name: Option<String>,
         /// The session's program, when it is not the active one.
@@ -302,7 +303,7 @@ async fn load_server(
                 let other_program =
                     (summary.program_id != active.program.id).then(|| summary.program_name.clone());
                 LastSession::Loaded {
-                    summary,
+                    summary: Box::new(summary),
                     day_name,
                     other_program,
                 }
@@ -753,16 +754,19 @@ mod tests {
             program_version_id: ProgramVersionId::new_v7(),
             program_version: 1,
             day_id: "a".parse::<DayId>().unwrap(),
+            day_name: None,
             status,
             started_at: hours_before(26),
             finished_at: Some(hours_before(25)),
             working_sets,
+            volume: iron_oxide_domain::Volume::ZERO,
+            set_pr: false,
         }
     }
 
     fn loaded(summary: SessionSummary, day: Option<&str>) -> LastSession {
         LastSession::Loaded {
-            summary,
+            summary: Box::new(summary),
             day_name: day.map(str::to_owned),
             other_program: None,
         }
@@ -789,7 +793,7 @@ mod tests {
         );
         assert_eq!(
             line(LastSession::Loaded {
-                summary: summary(SessionStatus::Completed, 12),
+                summary: Box::new(summary(SessionStatus::Completed, 12)),
                 day_name: Some("Upper".to_owned()),
                 other_program: Some("Full body".to_owned()),
             })

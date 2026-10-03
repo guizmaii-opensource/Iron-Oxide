@@ -78,15 +78,17 @@
 //!   So 1 × 5 at 100 kg followed by a 110 kg single is a success at 100 kg, 3 × 5 at 100 kg
 //!   followed by 1 × 10 at 60 kg is a success at 100 kg, and 2 × 5 at 100 kg (third set
 //!   skipped) followed by a 60 kg back-off set is a failure at 100 kg.
-//! - **Training max rule**: sets at least as heavy as what the session was prescribed: its
-//!   percentage of the training max at that point of the replay (or its fixed weight), exact and
-//!   unrounded, less a fixed tolerance of half of [`ProgressionSettings::max_step`] (1.25 kg).
-//!   Settings cannot exceed that step, so any target the app showed (rounded to the nearest step)
-//!   counts. A set more than 1.25 kg below the exact prescribed weight does not count (so a set a
-//!   full step lighter than the target shown does not count with the default steps, but may with
-//!   a step of less than 1.25 kg). Near [`Weight::MAX`], where targets are rounded down, the
-//!   threshold is lowered so that the target shown still counts. Only the prescribed working
-//!   sets are considered. The verdict never depends on the current settings.
+//! - **Training max rule**: sets at least as heavy as what the session was prescribed. A set
+//!   logged with its target ([`WorkingSet::target`], the prefill the lifter saw, stored since #60)
+//!   counts when it is at least that target's weight, **exactly**: "lifted at least what was
+//!   prescribed then", whatever the step was. A set logged without one (before #60), or with a
+//!   target that has no weight (never a training max prescription), is compared
+//!   with its prescription's exact weight (its percentage of the training max at that point of
+//!   the replay, or its fixed weight, unrounded) less a fixed tolerance of 1.25 kg, half of the
+//!   2.5 kg the step was capped at then, so that any target the app could have shown counts. Near
+//!   [`Weight::MAX`], where targets are rounded down, that threshold is lowered so that the target
+//!   shown still counts. Only the prescribed working sets are considered. Either way the verdict
+//!   never depends on the current settings, so the step has no upper bound any more.
 //!
 //! # Rules
 //!

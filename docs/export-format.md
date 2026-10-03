@@ -13,7 +13,7 @@ passkey key material.
 ```json
 {
   "format": "iron-oxide-export",
-  "format_version": 1,
+  "format_version": 2,
   "exported_at": 1790000600000,
   "account": {
     "user_id": "0199a3c4-…",
@@ -62,7 +62,8 @@ passkey key material.
       "finished_at": 1790003600000,
       "sets": [
         { "id": "0199a3c7-…", "exercise": "back-squat", "set_index": 0, "reps": 5, "weight": 100.0,
-          "duration": null, "warm_up": false, "completed_at": 1790000300000 }
+          "duration": null, "warm_up": false, "completed_at": 1790000300000,
+          "target": { "weight": 100.0, "goal": { "reps": { "reps": 5, "range": null } } } }
       ]
     }
   ]
@@ -82,7 +83,7 @@ The values use the API's types (`docs/api.md`):
 | Field | What | On import |
 |---|---|---|
 | `format` | Always `iron-oxide-export` | Checked first: anything else is `422 This file is not an Iron Oxide export.` |
-| `format_version` | `1` | Checked before the rest is parsed: another version is a `422` that names it |
+| `format_version` | `2` (see [Versioning](#versioning)) | Checked before the rest is parsed: versions 1 and 2 are read, another is a `422` that names it |
 | `exported_at` | When the export was made | Ignored |
 | `account` | User id, creation time, plan, display name | **Ignored.** An import never changes the account, its plan or its name. |
 | `sign_in.passkeys` | Each passkey's nickname, dates and whether it is synced (`backed_up`). No public key, credential id or user handle. | Ignored: a passkey cannot be restored from a file |
@@ -96,6 +97,7 @@ The values use the API's types (`docs/api.md`):
 | `sessions` | Every workout session, oldest first | See below |
 | `sessions[].program`, `.version` | The session's program (`creation_id`) and version number | Must be a version in the export, and `day` one of its days |
 | `sessions[].sets` | The session's sets, in the order they were completed (the domain `LoggedSet`) | Set ids unique in the file |
+| `sessions[].sets[].target` | What the app prescribed for the set when it was logged (#60): the `SetTarget` shown (`weight`, and `goal`: reps with the program's range, a hold or intervals). Left out when none was recorded (sets logged before #60, extras) | Kept as is; a set without it is judged with the legacy tolerance |
 
 Server-generated ids (program and version ids) are not in the export: they are global, so another
 account could not reuse them. Programs are keyed by `creation_id`, versions by their number, and
@@ -229,6 +231,16 @@ fields are ignored on import.
 
 When the version changes, the server keeps reading the versions it can still convert, and this page
 documents each one.
+
+| Version | Since | What changed | Imported |
+|---|---|---|---|
+| 1 | #22 | The first format | yes: its sets have no `target`, as if logged before #60 |
+| 2 | #60 | Sets may carry their `target` | yes |
+
+Version 2 only adds an optional field, which an older reader would ignore. It still gets a new
+version: a version 1 reader importing it would drop the targets, and the training max sessions it
+restores would then be judged with the legacy tolerance instead of exactly, which can change their
+verdicts (for a step above 2.5 kg). A version 2 reader reads version 1 as is.
 
 ## Account deletion
 

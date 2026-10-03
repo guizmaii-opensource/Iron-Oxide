@@ -140,7 +140,8 @@ pub async fn settings(
     user: UserId,
 ) -> Result<Option<(UserSettings, OffsetDateTime)>, RepoError> {
     let row = sqlx::query!(
-        "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled, updated_at
+        "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled,
+                kg_weight_step_ng, lb_weight_step_ng, vibration_enabled, updated_at
          FROM user_settings WHERE user_id = $1",
         user.as_uuid()
     )
@@ -153,6 +154,9 @@ pub async fn settings(
             plate_inventory: row.plate_inventory,
             default_rest_s: narrow(row.default_rest_s, "user_settings.default_rest_s")?,
             sound_enabled: row.sound_enabled,
+            kg_weight_step_ng: narrow(row.kg_weight_step_ng, "user_settings.kg_weight_step_ng")?,
+            lb_weight_step_ng: narrow(row.lb_weight_step_ng, "user_settings.lb_weight_step_ng")?,
+            vibration_enabled: row.vibration_enabled,
         };
         Ok((settings, row.updated_at))
     })
@@ -278,6 +282,10 @@ pub struct Set {
     pub duration_s: Option<i64>,
     pub warmup: bool,
     pub completed_at: OffsetDateTime,
+    /// The prescribed target's load (#60); `None` for a body-weight target or no target.
+    pub target_weight_ng: Option<i64>,
+    /// The prescribed target's `SetGoal` JSON (#60); `None` when no target was recorded.
+    pub target_goal: Option<JsonValue>,
 }
 
 /// The user's sets, by session and in the order they were completed.
@@ -285,7 +293,7 @@ pub async fn sets(tx: &mut PgConnection, user: UserId) -> Result<Vec<Set>, RepoE
     Ok(sqlx::query_as!(
         Set,
         "SELECT session_id, id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,
-                completed_at
+                completed_at, target_weight_ng, target_goal
          FROM workout_sets WHERE user_id = $1
          ORDER BY session_id, completed_at, id",
         user.as_uuid()
@@ -306,11 +314,24 @@ pub async fn insert_settings(
     let bar_weight_ng = i64::try_from(settings.bar_weight_ng).map_err(|_| RepoError::Invalid {
         constraint: Some("user_settings_bar_weight_ng_check".to_owned()),
     })?;
+    let step = |value: u64, constraint: &str| {
+        i64::try_from(value).map_err(|_| RepoError::Invalid {
+            constraint: Some(constraint.to_owned()),
+        })
+    };
+    let kg_weight_step_ng = step(
+        settings.kg_weight_step_ng,
+        "user_settings_kg_weight_step_ng_check",
+    )?;
+    let lb_weight_step_ng = step(
+        settings.lb_weight_step_ng,
+        "user_settings_lb_weight_step_ng_check",
+    )?;
     let inserted = sqlx::query!(
         "INSERT INTO user_settings
              (user_id, unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled,
-              updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+              kg_weight_step_ng, lb_weight_step_ng, vibration_enabled, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (user_id) DO NOTHING",
         user.as_uuid(),
         settings.unit.as_str(),
@@ -318,6 +339,9 @@ pub async fn insert_settings(
         settings.plate_inventory,
         i64::from(settings.default_rest_s),
         settings.sound_enabled,
+        kg_weight_step_ng,
+        lb_weight_step_ng,
+        settings.vibration_enabled,
         updated_at,
     )
     .execute(tx)
@@ -582,16 +606,18 @@ pub async fn insert_sets(
     let durations: Vec<Option<i64>> = sets.iter().map(|s| s.duration_s).collect();
     let warmups: Vec<bool> = sets.iter().map(|s| s.warmup).collect();
     let completed: Vec<OffsetDateTime> = sets.iter().map(|s| s.completed_at).collect();
+    let target_weights: Vec<Option<i64>> = sets.iter().map(|s| s.target_weight_ng).collect();
+    let target_goals: Vec<Option<JsonValue>> = sets.iter().map(|s| s.target_goal.clone()).collect();
     Ok(sqlx::query!(
         "INSERT INTO workout_sets
              (id, session_id, user_id, exercise_id, set_index, reps, weight_ng, duration_s,
-              warmup, completed_at)
+              warmup, completed_at, target_weight_ng, target_goal)
          SELECT u.id, u.session_id, $1, u.exercise_id, u.set_index, u.reps, u.weight_ng,
-                u.duration_s, u.warmup, u.completed_at
+                u.duration_s, u.warmup, u.completed_at, u.target_weight_ng, u.target_goal
          FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::int[], $6::int[], $7::bigint[],
-                     $8::bigint[], $9::bool[], $10::timestamptz[])
+                     $8::bigint[], $9::bool[], $10::timestamptz[], $11::bigint[], $12::jsonb[])
              AS u (id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,
-                   completed_at)
+                   completed_at, target_weight_ng, target_goal)
          ON CONFLICT (user_id, id) DO NOTHING",
         user.as_uuid(),
         &ids,
@@ -603,6 +629,8 @@ pub async fn insert_sets(
         &durations as &[Option<i64>],
         &warmups,
         &completed,
+        &target_weights as &[Option<i64>],
+        &target_goals as &[Option<JsonValue>],
     )
     .execute(tx)
     .await?

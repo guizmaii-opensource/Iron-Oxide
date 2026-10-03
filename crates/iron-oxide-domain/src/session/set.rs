@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::duration::Seconds;
 use crate::ids::{ExerciseId, SetId};
+use crate::progression::SetTarget;
 use crate::reps::Reps;
 use crate::weight::Weight;
 
@@ -17,7 +18,8 @@ use crate::weight::Weight;
 /// unique IDs) are enforced by [`SessionLog`](super::SessionLog).
 ///
 /// Serializes as an object with the field names below; `weight` and `duration` are `null` when
-/// absent. Unknown fields are ignored on load, for forward compatibility.
+/// absent, and `target` is left out when absent (so a set saved before #60, in an offline store or
+/// an export, still loads). Unknown fields are ignored on load, for forward compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LoggedSet<T> {
     /// Client-generated ID, the idempotency key.
@@ -37,6 +39,15 @@ pub struct LoggedSet<T> {
     pub warm_up: bool,
     /// When the set was completed.
     pub completed_at: T,
+    /// What the app prescribed for this set when it was logged (the prefill the lifter saw: the
+    /// progression's target, or last session's set), or `None` when nothing was prescribed (an
+    /// extra set, an added exercise) or the set was logged before #60.
+    ///
+    /// The progression engine judges a training max session's set against it exactly ("lifted at
+    /// least what was prescribed then"), so the verdict depends neither on today's settings nor on
+    /// a tolerance; a set without it is judged with the legacy tolerance (see `progression`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<SetTarget>,
 }
 
 #[cfg(test)]
@@ -55,6 +66,7 @@ mod tests {
             duration: None,
             warm_up: false,
             completed_at: 1_700_000_000_000_i64,
+            target: None,
         };
         let json = serde_json::to_value(&set).unwrap();
         assert_eq!(
@@ -81,6 +93,7 @@ mod tests {
             duration: Some(Seconds::new(60)),
             warm_up: true,
             completed_at: 5_i64,
+            target: None,
         };
         let text = serde_json::to_string(&plank).unwrap();
         assert_eq!(
@@ -102,5 +115,48 @@ mod tests {
             "completed_at": 0,
         });
         assert!(serde_json::from_value::<LoggedSet<i64>>(json).is_err());
+    }
+
+    #[test]
+    fn the_prescribed_target_round_trips_and_is_optional() {
+        use crate::progression::SetGoal;
+        let set = LoggedSet {
+            id: SetId::from_uuid(Uuid::from_u128(9)),
+            exercise: ExerciseId::new("bench-press").unwrap(),
+            set_index: 0,
+            reps: Reps::new(5),
+            weight: Some(Weight::from_kg(80.0).unwrap()),
+            duration: None,
+            warm_up: false,
+            completed_at: 7_i64,
+            target: Some(SetTarget {
+                weight: Some(Weight::from_kg(77.5).unwrap()),
+                goal: SetGoal::Reps {
+                    reps: Reps::new(5),
+                    range: None,
+                },
+            }),
+        };
+        let json = serde_json::to_value(&set).unwrap();
+        assert_eq!(
+            json["target"],
+            serde_json::json!({ "weight": 77.5, "goal": { "reps": { "reps": 5, "range": null } } })
+        );
+        assert_eq!(
+            serde_json::from_value::<LoggedSet<i64>>(json.clone()).unwrap(),
+            set
+        );
+        // A set saved before #60 (offline store, export v1) has no `target`: it loads as `None`.
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("target");
+        let loaded = serde_json::from_value::<LoggedSet<i64>>(old).unwrap();
+        assert_eq!(loaded.target, None);
+        assert_eq!(
+            loaded,
+            LoggedSet {
+                target: None,
+                ..set
+            }
+        );
     }
 }

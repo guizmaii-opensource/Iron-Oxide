@@ -1,19 +1,17 @@
-//! Preferences of this device only (#34): the weight step of the steppers and vibration.
+//! The weight steps offered, and the one-time move of the old device-only preferences (#103).
 //!
-//! The server's settings (`crate::api::settings`) have no field for them, so they live in the
-//! browser's `localStorage`, under a key per user, and do not follow the user to another device.
-//! Signing out removes them. A missing, unreadable or outdated entry gives the defaults; nothing
-//! here can fail.
+//! The weight step and vibration were kept on the device (`localStorage`, one key per user) until
+//! #103 moved them into the user's settings on the server. When a user's settings load, any value
+//! still on this device is carried over, but only into a setting the server still has at its
+//! default (a choice made on another device since wins), and the device's copy is removed.
 
-use dioxus::prelude::*;
 use iron_oxide_domain::{Unit, Weight};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use super::user_settings::UserSettings;
+use crate::api::settings::Settings;
 use crate::auth::types::UserId;
 
-/// The start of the `localStorage` keys, one per user (`….<user id>`). Bump the version if the
-/// shape changes incompatibly.
+/// The start of the old `localStorage` keys, one per user (`….<user id>`).
 const STORAGE_KEY_PREFIX: &str = "iron-oxide.device-prefs.v1";
 
 /// The weight steps offered, per unit, lightest first.
@@ -25,158 +23,65 @@ pub const fn step_choices(unit: Unit) -> &'static [f64] {
     }
 }
 
-/// The step a weight stepper moves by when the user never chose one: 2.5 kg or 5 lb.
-#[must_use]
-pub fn default_step(unit: Unit) -> Weight {
-    let value = match unit {
-        Unit::Kg => 2.5,
-        Unit::Lb => 5.0,
-    };
-    Weight::new(value, unit).unwrap_or(Weight::ZERO)
-}
-
-/// This device's preferences.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What the device kept before #103.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct DevicePrefs {
-    /// The weight step in kg mode; `None` for [`default_step`].
     #[serde(default)]
     pub kg_step: Option<Weight>,
-    /// The weight step in lb mode; `None` for [`default_step`].
     #[serde(default)]
     pub lb_step: Option<Weight>,
-    /// Whether the rest timer vibrates the phone when it ends (where the browser can).
-    #[serde(default = "yes")]
-    pub vibration: bool,
-}
-
-const fn yes() -> bool {
-    true
-}
-
-impl Default for DevicePrefs {
-    fn default() -> Self {
-        Self {
-            kg_step: None,
-            lb_step: None,
-            vibration: true,
-        }
-    }
+    #[serde(default)]
+    pub vibration: Option<bool>,
 }
 
 impl DevicePrefs {
-    /// The step weight steppers move by in `unit`.
+    /// Reads a stored entry; anything unreadable is nothing to carry over.
     #[must_use]
-    pub fn weight_step(&self, unit: Unit) -> Weight {
-        let chosen = match unit {
-            Unit::Kg => self.kg_step,
-            Unit::Lb => self.lb_step,
-        };
-        chosen
-            .filter(|step| !step.is_zero())
-            .unwrap_or_else(|| default_step(unit))
-    }
-
-    /// The same preferences with `step` as the weight step of `unit`.
-    #[must_use]
-    pub const fn with_weight_step(mut self, unit: Unit, step: Weight) -> Self {
-        match unit {
-            Unit::Kg => self.kg_step = Some(step),
-            Unit::Lb => self.lb_step = Some(step),
-        }
-        self
-    }
-
-    /// Reads stored preferences; anything unreadable gives the defaults.
-    #[must_use]
-    pub fn parse(stored: Option<&str>) -> Self {
-        stored
-            .and_then(|text| serde_json::from_str(text).ok())
-            .unwrap_or_default()
-    }
-
-    /// The text stored for these preferences.
-    #[must_use]
-    pub fn to_stored(self) -> String {
-        serde_json::to_string(&self).unwrap_or_default()
+    pub fn parse(stored: &str) -> Option<Self> {
+        serde_json::from_str(stored).ok()
     }
 }
 
-/// The storage key of `user`'s preferences on this device.
+/// The storage key of `user`'s old preferences on this device.
 #[must_use]
 pub fn storage_key(user: UserId) -> String {
     format!("{STORAGE_KEY_PREFIX}.{user}")
 }
 
-/// This device's preferences for the signed-in user. `Copy`.
-#[derive(Clone, Copy, PartialEq)]
-pub struct DevicePrefsHandle {
-    prefs: Signal<DevicePrefs>,
-    user: Signal<Option<UserId>>,
-}
-
-impl DevicePrefsHandle {
-    /// The preferences (the defaults while signed out).
-    #[must_use]
-    pub fn get(&self) -> DevicePrefs {
-        *self.prefs.read()
-    }
-
-    /// The preferences without subscribing (for event handlers).
-    #[must_use]
-    pub fn peek(&self) -> DevicePrefs {
-        *self.prefs.peek()
-    }
-
-    /// Changes the preferences and stores them for the signed-in user.
-    pub fn save(self, new: DevicePrefs) {
-        let mut prefs = self.prefs;
-        prefs.set(new);
-        if let Some(user) = *self.user.peek() {
-            storage::write(&storage_key(user), &new.to_stored());
-        }
-    }
-}
-
-/// Provides this device's preferences, per user: loaded when the user's settings are (that is when
-/// the app knows who is signed in), back to the defaults and removed from this device on sign-out.
-/// Called once, by the app root, after the settings.
-pub fn use_device_prefs_provider(settings: UserSettings) -> DevicePrefsHandle {
-    let handle = DevicePrefsHandle {
-        prefs: use_signal(DevicePrefs::default),
-        user: use_signal(|| None),
-    };
-    use_context_provider(|| handle);
-    // Client only, so the server-rendered page and hydration match.
-    use_effect(move || {
-        if !cfg!(feature = "web") {
-            return;
-        }
-        let user = settings.user();
-        let previous = *handle.user.peek();
-        if user == previous {
-            return;
-        }
-        let (mut prefs, mut current) = (handle.prefs, handle.user);
-        if let (None, Some(previous)) = (user, previous) {
-            // Signed out: nothing of theirs stays on this device.
-            storage::remove(&storage_key(previous));
-        }
-        current.set(user);
-        prefs.set(match user {
-            Some(user) => DevicePrefs::parse(storage::read(&storage_key(user)).as_deref()),
-            None => DevicePrefs::default(),
-        });
-    });
-    handle
-}
-
-/// This device's preferences for the signed-in user.
+/// `settings` with the device's old preferences carried over into every setting the server still
+/// has at its default.
 #[must_use]
-pub fn use_device_prefs() -> DevicePrefsHandle {
-    use_context::<DevicePrefsHandle>()
+pub fn carry_over(settings: &Settings, device: DevicePrefs) -> Settings {
+    let defaults = Settings::defaults();
+    let mut carried = settings.clone();
+    if let Some(step) = device.kg_step.filter(|step| !step.is_zero())
+        && settings.kg_weight_step == defaults.kg_weight_step
+    {
+        carried.kg_weight_step = step;
+    }
+    if let Some(step) = device.lb_step.filter(|step| !step.is_zero())
+        && settings.lb_weight_step == defaults.lb_weight_step
+    {
+        carried.lb_weight_step = step;
+    }
+    if let Some(vibration) = device.vibration
+        && settings.vibration_enabled == defaults.vibration_enabled
+    {
+        carried.vibration_enabled = vibration;
+    }
+    carried
 }
 
-/// `localStorage`, best effort: private modes and full quotas only lose the preference.
+/// Takes `user`'s old preferences off this device, if any.
+#[must_use]
+pub fn take_device_prefs(user: UserId) -> Option<DevicePrefs> {
+    let key = storage_key(user);
+    let stored = storage::read(&key)?;
+    storage::remove(&key);
+    DevicePrefs::parse(&stored)
+}
+
+/// `localStorage`, best effort.
 #[cfg(feature = "web")]
 mod storage {
     fn local_storage() -> Option<web_sys::Storage> {
@@ -185,13 +90,6 @@ mod storage {
 
     pub fn read(key: &str) -> Option<String> {
         local_storage()?.get_item(key).ok().flatten()
-    }
-
-    pub fn write(key: &str, value: &str) {
-        if let Some(storage) = local_storage() {
-            // A refused write keeps the preference for this visit only.
-            let _ = storage.set_item(key, value);
-        }
     }
 
     pub fn remove(key: &str) {
@@ -208,8 +106,6 @@ mod storage {
         None
     }
 
-    pub const fn write(_key: &str, _value: &str) {}
-
     pub const fn remove(_key: &str) {}
 }
 
@@ -222,62 +118,62 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_two_and_a_half_kg_or_five_lb_and_vibration_on() {
-        let prefs = DevicePrefs::default();
-        assert_eq!(prefs.weight_step(Unit::Kg), kg(2.5));
-        assert_eq!(prefs.weight_step(Unit::Lb), Weight::from_lb(5.0).unwrap());
-        assert!(prefs.vibration);
+    fn old_entries_are_read_as_they_were_written() {
+        // What #34's build stored.
+        let stored = r#"{"kg_step":1.0,"lb_step":null,"vibration":false}"#;
+        assert_eq!(
+            DevicePrefs::parse(stored),
+            Some(DevicePrefs {
+                kg_step: Some(kg(1.0)),
+                lb_step: None,
+                vibration: Some(false),
+            })
+        );
+        assert_eq!(DevicePrefs::parse("not json"), None);
     }
 
     #[test]
-    fn each_unit_keeps_its_own_step() {
-        let prefs = DevicePrefs::default().with_weight_step(Unit::Kg, kg(1.25));
-        assert_eq!(prefs.weight_step(Unit::Kg), kg(1.25));
-        assert_eq!(prefs.weight_step(Unit::Lb), default_step(Unit::Lb));
-        // A zero step would never move: it falls back to the default.
-        let zero = DevicePrefs::default().with_weight_step(Unit::Lb, Weight::ZERO);
-        assert_eq!(zero.weight_step(Unit::Lb), default_step(Unit::Lb));
-    }
-
-    #[test]
-    fn stored_preferences_round_trip() {
-        let prefs = DevicePrefs {
+    fn device_values_fill_settings_still_at_their_defaults() {
+        let device = DevicePrefs {
             kg_step: Some(kg(1.0)),
             lb_step: None,
-            vibration: false,
+            vibration: Some(false),
         };
-        assert_eq!(DevicePrefs::parse(Some(&prefs.to_stored())), prefs);
+        let carried = carry_over(&Settings::defaults(), device);
+        assert_eq!(carried.kg_weight_step, kg(1.0));
+        assert_eq!(carried.lb_weight_step, Settings::defaults().lb_weight_step);
+        assert!(!carried.vibration_enabled);
     }
 
     #[test]
-    fn missing_or_unreadable_storage_gives_the_defaults() {
-        assert_eq!(DevicePrefs::parse(None), DevicePrefs::default());
-        assert_eq!(DevicePrefs::parse(Some("not json")), DevicePrefs::default());
-        assert_eq!(DevicePrefs::parse(Some("{}")), DevicePrefs::default());
-        // A step that is not a valid weight drops the whole entry rather than half of it.
-        assert_eq!(
-            DevicePrefs::parse(Some(r#"{"kg_step": -1, "vibration": false}"#)),
-            DevicePrefs::default()
-        );
-        assert!(!DevicePrefs::parse(Some(r#"{"vibration": false}"#)).vibration);
+    fn a_choice_already_on_the_server_wins() {
+        let server = Settings {
+            kg_weight_step: kg(5.0),
+            ..Settings::defaults()
+        };
+        let device = DevicePrefs {
+            kg_step: Some(kg(1.0)),
+            lb_step: None,
+            vibration: None,
+        };
+        assert_eq!(carry_over(&server, device), server);
     }
 
     #[test]
-    fn each_user_has_their_own_key() {
+    fn each_user_had_their_own_key() {
         let a = UserId::from_uuid(uuid::Uuid::from_u128(1));
-        let b = UserId::from_uuid(uuid::Uuid::from_u128(2));
-        assert_ne!(storage_key(a), storage_key(b));
-        assert!(storage_key(a).starts_with("iron-oxide.device-prefs.v1."));
-        assert!(storage_key(a).ends_with(&a.to_string()));
+        assert_eq!(storage_key(a), format!("iron-oxide.device-prefs.v1.{a}"));
     }
 
     #[test]
-    fn every_step_choice_is_a_valid_weight() {
+    fn every_step_choice_is_a_valid_weight_and_includes_the_defaults() {
         for unit in Unit::ALL {
+            let max = Weight::from_kg(crate::api::settings::MAX_WEIGHT_STEP_KG).unwrap();
             for &value in step_choices(unit) {
-                assert!(Weight::new(value, unit).is_ok(), "{value} {unit}");
+                let step = Weight::new(value, unit).unwrap();
+                assert!(!step.is_zero() && step <= max, "{value} {unit}");
             }
-            let default = default_step(unit);
+            let default = Settings::defaults().weight_step(unit);
             assert!(
                 step_choices(unit)
                     .iter()

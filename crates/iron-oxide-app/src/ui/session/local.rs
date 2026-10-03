@@ -275,6 +275,7 @@ mod tests {
             duration: None,
             warm_up: false,
             completed_at: Timestamp::from_epoch_millis(at),
+            target: None,
         }
     }
 

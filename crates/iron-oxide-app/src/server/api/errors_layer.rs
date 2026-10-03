@@ -17,9 +17,11 @@
 //! details: d }`: our message and details are the `ServerError`'s own fields.
 //!
 //! - Arguments that do not decode become `422 Invalid request.`
-//! - Every 5xx except 503 gets the generic message and no details: nothing a function puts in a
-//!   500 (`ServerFnError::new(detail)`, an `anyhow` error) reaches the client. The original is
-//!   logged.
+//! - Every 5xx gets a fixed message and no details: nothing a function puts in a 500
+//!   (`ServerFnError::new(detail)`, an `anyhow` error) or a 503 reaches the client. A 503 gets the
+//!   retry message ([`TRANSIENT`]), every other 5xx the generic one ([`INTERNAL`]). The one detail
+//!   a 503 keeps is a bounded `retry_after_secs` (1 to 3600), so its `Retry-After` survives. The
+//!   original is logged.
 //! - A 5xx whose body is not one of these shapes (not JSON: a panic's text, which Dioxus includes
 //!   in debug builds; or JSON of another shape) gets the generic message too, keeping its status
 //!   (a 503 gets the retry message). Other non-JSON 4xx bodies (axum's own 405 or 415) are kept.
@@ -124,13 +126,30 @@ fn rewrite(status: StatusCode, body: &Value) -> Option<(StatusCode, String, Opti
             }
             (status, text.to_owned(), body.get("details").cloned())
         };
-    if status.is_server_error() && status != StatusCode::SERVICE_UNAVAILABLE {
-        if message != INTERNAL {
-            tracing::error!(%status, error = message, "server function failed");
+    if status.is_server_error() {
+        let public = generic(status);
+        let kept = (status == StatusCode::SERVICE_UNAVAILABLE)
+            .then(|| retry_after_only(details.as_ref()))
+            .flatten();
+        if message != public || details != kept {
+            tracing::error!(%status, error = message, ?details, "server function failed");
         }
-        return Some((status, INTERNAL.to_owned(), None));
+        return Some((status, public.to_owned(), kept));
     }
     Some((status, message, details))
+}
+
+/// The longest `retry_after_secs` a `503` passes on: longer is not a wait anyone retries after.
+const MAX_RETRY_AFTER_SECS: u64 = 3_600;
+
+/// The only detail a `503` keeps: `{"retry_after_secs": n}`, a whole number of seconds from 1 to
+/// [`MAX_RETRY_AFTER_SECS`] (a busy account import or deletion, #22). Anything else is dropped.
+fn retry_after_only(details: Option<&Value>) -> Option<Value> {
+    let secs = details?
+        .get(crate::rate_limit::RETRY_AFTER_SECS)?
+        .as_u64()
+        .filter(|secs| (1..=MAX_RETRY_AFTER_SECS).contains(secs))?;
+    Some(json!({ crate::rate_limit::RETRY_AFTER_SECS: secs }))
 }
 
 fn rebuild(
@@ -289,7 +308,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn no_5xx_text_or_details_reach_the_wire_except_503() {
+    async fn no_5xx_text_or_details_reach_the_wire() {
         let secret = "relation workout_sets at 10.0.0.3";
         for (status, body) in [
             (
@@ -313,12 +332,77 @@ pub(crate) mod tests {
             assert_eq!(message, INTERNAL);
             assert_eq!(details, None);
         }
-        let (_, message, _) = rewrite(
+        // A 503 always gets the fixed retry message, whatever its body says (#104).
+        for body in [
+            returned(503, "Please try again.", None),
+            returned(503, secret, Some(json!(secret))),
+            json!({ "message": secret, "code": 503, "data": { "where": secret } }),
+            json!({ "error": secret, "details": secret }),
+        ] {
+            let (status, message, details) =
+                rewrite(StatusCode::SERVICE_UNAVAILABLE, &body).unwrap();
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(message, TRANSIENT, "{body}");
+            assert_eq!(details, None, "{body}");
+        }
+        let (status, failure) = through_the_client(
             StatusCode::SERVICE_UNAVAILABLE,
-            &returned(503, "The server is busy.", None),
+            json!({ "message": secret, "code": 503, "data": { "where": secret } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(failure.message, TRANSIENT);
+        assert!(failure.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn a_503_keeps_only_a_bounded_retry_after() {
+        let secret = "relation workout_sets at 10.0.0.3";
+        let busy = |details: Value| returned(503, secret, Some(details));
+        for (details, kept) in [
+            (
+                json!({ "retry_after_secs": 5 }),
+                Some(json!({ "retry_after_secs": 5 })),
+            ),
+            (
+                json!({ "retry_after_secs": 5, "where": secret }),
+                Some(json!({ "retry_after_secs": 5 })),
+            ),
+            (json!({ "retry_after_secs": 0 }), None),
+            (json!({ "retry_after_secs": 3_601 }), None),
+            (json!({ "retry_after_secs": -1 }), None),
+            (json!({ "retry_after_secs": 1.5 }), None),
+            (json!({ "retry_after_secs": "5" }), None),
+            (json!(secret), None),
+        ] {
+            let (_, message, got) =
+                rewrite(StatusCode::SERVICE_UNAVAILABLE, &busy(details.clone())).unwrap();
+            assert_eq!(message, TRANSIENT, "{details}");
+            assert_eq!(got, kept, "{details}");
+        }
+        // Other 5xx keep nothing, not even a wait.
+        let (_, _, got) = rewrite(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &returned(500, secret, Some(json!({ "retry_after_secs": 5 }))),
         )
         .unwrap();
-        assert_eq!(message, "The server is busy.");
+        assert_eq!(got, None);
+        let (status, failure) = through_the_client(
+            StatusCode::SERVICE_UNAVAILABLE,
+            busy(json!({ "retry_after_secs": 5 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(failure.message, TRANSIENT);
+        assert_eq!(failure.details, Some(json!({ "retry_after_secs": 5 })));
+        // And the `Retry-After` header.
+        let (status, message, details) = rewrite(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &busy(json!({ "retry_after_secs": 5, "where": secret })),
+        )
+        .unwrap();
+        let response = rebuild(Response::new(()).into_parts().0, status, &message, details);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "5");
     }
 
     /// `normalize` around a route answering `status` with `body`.

@@ -12,7 +12,7 @@
 //! - Every passkey is created with user verification required and as a discoverable ("resident")
 //!   credential.
 
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 use webauthn_rs::prelude::{
@@ -126,40 +126,45 @@ pub async fn sign_up_begin(
     Ok(require_discoverable(ccr))
 }
 
-/// Finishes sign-up: verifies the new passkey, creates the user with it, and signs in.
+/// Finishes sign-up: verifies the new passkey, creates the user with it, and signs in. The
+/// ceremony is taken in the same transaction ([`ceremony::complete`]): a `503` leaves it usable.
 pub async fn sign_up_finish(
     ctx: &AuthContext,
     credential: &RegisterPublicKeyCredential,
 ) -> Result<Me, AuthError> {
-    let state: SignUpState =
-        ceremony::take(ctx.db(), &ctx.session, CeremonyKind::PasskeySignUp, None).await?;
-    check_discoverable(credential)?;
-    let passkey = ctx
-        .auth
-        .webauthn()
-        .finish_passkey_registration(credential, &state.registration)?;
-    let user = UserId::from_uuid(state.user_id);
-
-    let mut tx = ctx.db().begin().await?;
-    sqlx::query!(
-        "INSERT INTO users (id, display_name) VALUES ($1, $2)",
-        user.as_uuid(),
-        state.display_name,
+    let me = ceremony::complete(
+        ctx.db(),
+        &ctx.session,
+        CeremonyKind::PasskeySignUp,
+        None,
+        async |tx, state: SignUpState| {
+            check_discoverable(credential)?;
+            let passkey = ctx
+                .auth
+                .webauthn()
+                .finish_passkey_registration(credential, &state.registration)?;
+            let user = UserId::from_uuid(state.user_id);
+            sqlx::query!(
+                "INSERT INTO users (id, display_name) VALUES ($1, $2)",
+                user.as_uuid(),
+                state.display_name,
+            )
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query!(
+                "INSERT INTO webauthn_user_handles (user_id, user_handle) VALUES ($1, $2)",
+                user.as_uuid(),
+                state.user_handle,
+            )
+            .execute(&mut **tx)
+            .await?;
+            insert_passkey(tx, user, &passkey, FIRST_PASSKEY_NICKNAME).await?;
+            account(tx, user).await
+        },
     )
-    .execute(&mut *tx)
     .await?;
-    sqlx::query!(
-        "INSERT INTO webauthn_user_handles (user_id, user_handle) VALUES ($1, $2)",
-        user.as_uuid(),
-        state.user_handle,
-    )
-    .execute(&mut *tx)
-    .await?;
-    insert_passkey(&mut tx, user, &passkey, FIRST_PASSKEY_NICKNAME).await?;
-    tx.commit().await?;
-
-    ctx.sign_in(user).await?;
-    me(ctx, user).await
+    ctx.sign_in(me.user_id).await?;
+    Ok(me)
 }
 
 /// Starts a username-less sign-in with a modal passkey prompt.
@@ -180,19 +185,38 @@ pub async fn sign_in_begin(ctx: &AuthContext) -> Result<RequestChallengeResponse
 
 /// Finishes a passkey sign-in: verifies the assertion against the stored passkey (signature,
 /// challenge, origin, RP ID, user verification, counter), records its new counter and backup
-/// state, and signs in.
+/// state, and signs in. The ceremony is taken in the same transaction
+/// ([`ceremony::complete`]): a `503` leaves it usable.
 pub async fn sign_in_finish(
     ctx: &AuthContext,
     credential: &PublicKeyCredential,
 ) -> Result<Me, AuthError> {
-    let authentication: DiscoverableAuthentication =
-        ceremony::take(ctx.db(), &ctx.session, CeremonyKind::PasskeySignIn, None).await?;
+    let me = ceremony::complete(
+        ctx.db(),
+        &ctx.session,
+        CeremonyKind::PasskeySignIn,
+        None,
+        async |tx, authentication: DiscoverableAuthentication| {
+            verify_sign_in(ctx, tx, credential, authentication).await
+        },
+    )
+    .await?;
+    ctx.sign_in(me.user_id).await?;
+    Ok(me)
+}
+
+/// The work of [`sign_in_finish`], in its transaction.
+async fn verify_sign_in(
+    ctx: &AuthContext,
+    tx: &mut Transaction<'_, Postgres>,
+    credential: &PublicKeyCredential,
+    authentication: DiscoverableAuthentication,
+) -> Result<Me, AuthError> {
     let webauthn = ctx.auth.webauthn();
     let (user_handle, credential_id) = webauthn.identify_discoverable_authentication(credential)?;
 
     // Lock the passkey row: concurrent sign-ins with the same credential see each other's
     // counter update.
-    let mut tx = ctx.db().begin().await?;
     let row = sqlx::query!(
         "SELECT p.id, p.user_id, p.passkey
          FROM passkeys p JOIN webauthn_user_handles h ON h.user_id = p.user_id
@@ -201,7 +225,7 @@ pub async fn sign_in_finish(
         credential_id,
         user_handle,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?
     .ok_or(AuthError::UnknownPasskey)?;
 
@@ -225,13 +249,9 @@ pub async fn sign_in_finish(
         flags.backup_eligible,
         flags.backup_state,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
-
-    let user = UserId::from_uuid(row.user_id);
-    ctx.sign_in(user).await?;
-    me(ctx, user).await
+    account(tx, UserId::from_uuid(row.user_id)).await
 }
 
 /// Starts adding a passkey to the signed-in user's account. Their existing passkeys are
@@ -274,34 +294,40 @@ pub async fn add_begin(
     Ok(require_discoverable(ccr))
 }
 
-/// Finishes adding a passkey to the signed-in user's account.
+/// Finishes adding a passkey to the signed-in user's account. The ceremony is taken in the same
+/// transaction ([`ceremony::complete`]): a `503` leaves it usable.
 pub async fn add_finish(
     ctx: &AuthContext,
     user: UserId,
     credential: &RegisterPublicKeyCredential,
     nickname: &str,
 ) -> Result<Me, AuthError> {
-    let registration: PasskeyRegistration =
-        ceremony::take(ctx.db(), &ctx.session, CeremonyKind::PasskeyAdd, Some(user)).await?;
-    // Checked again: the sign-in may have aged past the window since `add_begin`.
-    ctx.require_recent_sign_in().await?;
-    check_discoverable(credential)?;
-    let passkey = ctx
-        .auth
-        .webauthn()
-        .finish_passkey_registration(credential, &registration)?;
-
-    let mut tx = ctx.db().begin().await?;
-    let count = lock_user_and_count_passkeys(&mut tx, user).await?;
-    if count >= MAX_PASSKEYS_PER_USER {
-        return Err(AuthError::Invalid(format!(
-            "You can have at most {MAX_PASSKEYS_PER_USER} passkeys."
-        )));
-    }
-    let nickname = nickname_or(nickname, || format!("Passkey {}", count.saturating_add(1)))?;
-    insert_passkey(&mut tx, user, &passkey, &nickname).await?;
-    tx.commit().await?;
-    me(ctx, user).await
+    ceremony::complete(
+        ctx.db(),
+        &ctx.session,
+        CeremonyKind::PasskeyAdd,
+        Some(user),
+        async |tx, registration: PasskeyRegistration| {
+            // Checked again: the sign-in may have aged past the window since `add_begin`.
+            ctx.require_recent_sign_in().await?;
+            check_discoverable(credential)?;
+            let passkey = ctx
+                .auth
+                .webauthn()
+                .finish_passkey_registration(credential, &registration)?;
+            let count = lock_user_and_count_passkeys(tx, user).await?;
+            if count >= MAX_PASSKEYS_PER_USER {
+                return Err(AuthError::Invalid(format!(
+                    "You can have at most {MAX_PASSKEYS_PER_USER} passkeys."
+                )));
+            }
+            let nickname =
+                nickname_or(nickname, || format!("Passkey {}", count.saturating_add(1)))?;
+            insert_passkey(tx, user, &passkey, &nickname).await?;
+            account(tx, user).await
+        },
+    )
+    .await
 }
 
 /// A new random WebAuthn user handle (UUIDv4: 122 bits from the OS CSPRNG).
@@ -434,13 +460,36 @@ fn rfc3339(time: OffsetDateTime) -> String {
 }
 
 /// The signed-in user's account: name, passkeys and linked Google account.
+/// Renames the account (see `crate::auth::api::rename_account`).
+pub async fn rename(ctx: &AuthContext, user: UserId, display_name: &str) -> Result<Me, AuthError> {
+    let display_name = normalize_name(display_name)
+        .map_err(|reason| AuthError::Invalid(format!("Your name {reason}.")))?
+        .ok_or_else(|| AuthError::Invalid("Your name must not be blank.".to_owned()))?;
+    let updated = sqlx::query!(
+        "UPDATE users SET display_name = $2 WHERE id = $1",
+        user.as_uuid(),
+        display_name
+    )
+    .execute(ctx.db())
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Err(AuthError::Unauthenticated);
+    }
+    me(ctx, user).await
+}
+
 pub async fn me(ctx: &AuthContext, user: UserId) -> Result<Me, AuthError> {
-    let pool = ctx.db();
+    account(&mut *ctx.db().acquire().await?, user).await
+}
+
+/// [`me`], read on `conn` (inside a transaction: what it is about to commit).
+async fn account(conn: &mut PgConnection, user: UserId) -> Result<Me, AuthError> {
     let display_name = sqlx::query_scalar!(
         "SELECT display_name FROM users WHERE id = $1",
         user.as_uuid()
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?
     .ok_or(AuthError::Unauthenticated)?;
     let passkeys = sqlx::query!(
@@ -448,7 +497,7 @@ pub async fn me(ctx: &AuthContext, user: UserId) -> Result<Me, AuthError> {
          WHERE user_id = $1 ORDER BY created_at, id",
         user.as_uuid()
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?
     .into_iter()
     .map(|row| PasskeyInfo {
@@ -464,7 +513,7 @@ pub async fn me(ctx: &AuthContext, user: UserId) -> Result<Me, AuthError> {
            AS "linked!""#,
         user.as_uuid()
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(Me {
         user_id: user,

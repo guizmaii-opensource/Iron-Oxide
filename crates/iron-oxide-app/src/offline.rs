@@ -67,8 +67,12 @@
 //!   Web Locks API (old browsers, insecure origins), two tabs may send the same write. The
 //!   server answers the second copy unchanged, so the only cost is a request.
 //! - Every change to the queue re-reads it from storage, applies the change and writes it back
-//!   in one synchronous step, and the `storage` event refreshes the other tabs. This way tabs
-//!   do not overwrite each other's writes. The memory copy and the stored one are merged by
+//!   in one synchronous step, and the `storage` event refreshes the other tabs. That step is not
+//!   a cross-tab lock (`localStorage` has none; Web Locks are asynchronous, and `enqueue` stores
+//!   the write before it returns), so two tabs writing at the same instant can overwrite each
+//!   other's change. Each tab's next load (its own change, a refresh, the `storage` event the
+//!   overwrite fires) stores the entries it holds that the stored copy lost; only closing that
+//!   tab first loses them (`storage::QueueStore`). The memory copy and the stored one are merged by
 //!   revision (`queue::Queue::merge`: per-entry and retry-state revisions from a Lamport clock,
 //!   tombstones for delivered and discarded writes), so a stale copy, such as a tab that could
 //!   not save for a while, never undoes a wait, a refusal, an edit, a delivery or a discard.
@@ -83,9 +87,11 @@
 //!
 //! `localStorage`, per user (`iron-oxide:outbox:<user id>`, `iron-oxide:session:<user id>`),
 //! versioned records ([`storage`]). Unreadable records or entries are moved to
-//! `<key>:unreadable` rather than deleted. When storage is blocked (the memory fallback) or full,
-//! the outbox carries on in memory and says so in `last_error` ("Not saved on this device"). A user's undelivered writes stay on the device after
-//! sign-out and are sent at their next sign-in.
+//! `<key>:unreadable`, which keeps the newest ten per key (`storage::MAX_UNREADABLE`; older ones
+//! are dropped with a warning). When storage is blocked (the memory fallback) or full, the outbox
+//! carries on in memory and says so in `last_error` ("Not saved on this device"), after the
+//! delivery error if there is one. A user's undelivered writes stay on the device after sign-out
+//! and are sent at their next sign-in.
 //!
 //! The pure parts ([`backoff`], [`queue`], [`storage`], [`session`]) have no browser
 //! dependency and are unit-tested on the host. [`platform`] holds the browser calls and

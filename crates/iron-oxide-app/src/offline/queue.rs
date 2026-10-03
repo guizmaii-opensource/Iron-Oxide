@@ -358,31 +358,38 @@ impl Queue {
         }
     }
 
-    /// `write` was delivered (`2xx`): removes it and resets the retry state. Does nothing if it is
-    /// no longer queued (another tab delivered it first). If the queue meanwhile holds an edited
-    /// version of it (same key, other values), that version is marked refused with
-    /// [`EDITED_AFTER_SAVE_MESSAGE`]: the server would answer it `409`.
+    /// `write` was delivered (`2xx`): removes it and resets the retry state. If the queue
+    /// meanwhile holds an edited version of it (same key, other values), that version is marked
+    /// refused with [`EDITED_AFTER_SAVE_MESSAGE`]: the server would answer it `409`.
+    ///
+    /// A stale success (another tab delivered and removed it first) only records the delivery:
+    /// the retry state then belongs to another head (a `429`'s `Retry-After`, a backoff) and is
+    /// left alone.
     pub fn on_success(&mut self, write: &Write) {
-        if let Some(index) = self.position(write) {
-            self.entries.remove(index);
-        }
+        let removed = self
+            .position(write)
+            .and_then(|index| self.entries.remove(index))
+            .is_some();
         self.bury(write.clone(), true);
         // An edit queued while the earlier values were in flight: newer than the tombstone, so
         // it stays, refused.
         let rev = self.tick();
-        if let Some(edited) = self
+        let edited = self
             .entries
             .iter_mut()
             .find(|entry| entry.write.key() == write.key())
-        {
-            edited.failed = Some(EDITED_AFTER_SAVE_MESSAGE.to_owned());
-            edited.rev = rev;
+            .map(|edited| {
+                edited.failed = Some(EDITED_AFTER_SAVE_MESSAGE.to_owned());
+                edited.rev = rev;
+            })
+            .is_some();
+        if removed || edited {
+            self.failures = 0;
+            self.retry_at = None;
+            self.not_before = None;
+            self.last_error = None;
+            self.touch_state();
         }
-        self.failures = 0;
-        self.retry_at = None;
-        self.not_before = None;
-        self.last_error = None;
-        self.touch_state();
     }
 
     /// Sending `write` failed. `random` is a uniform draw in `[0, 1)` for the jitter.
@@ -659,6 +666,7 @@ pub(crate) mod tests {
                 duration: None,
                 warm_up: false,
                 completed_at: at(2_000 + i64::from(index)),
+                target: None,
             },
         }
     }
@@ -749,6 +757,43 @@ pub(crate) mod tests {
         assert_eq!(queue.next_ready(at(1_001)), Some(&second));
         assert_eq!(queue.status().last_error, None);
         assert_eq!(queue.wake(at(1_001)), Wake::Now);
+    }
+
+    #[test]
+    fn a_stale_success_keeps_the_next_heads_retry_after() {
+        // Another tab delivered `first` and got a `429` on the next head; this tab's late
+        // success for `first` must not clear that wait (#104).
+        let session = SessionId::new_v7();
+        let (first, second) = (start(session), set(session, 0));
+        let mut queue = Queue::default();
+        queue.enqueue(first.clone(), at(0));
+        queue.enqueue(second.clone(), at(0));
+        queue.on_success(&first);
+        queue.on_failure(
+            &second,
+            Failure::Retry {
+                message: "Too many requests.".to_owned(),
+                retry_after: Some(Duration::from_secs(30)),
+            },
+            at(0),
+            0.0,
+            &B,
+        );
+        let waiting = queue.clone();
+        assert_eq!(queue.wake(at(0)), Wake::At(at(30_000)));
+
+        queue.on_success(&first);
+        assert_eq!(queue.wake(at(0)), Wake::At(at(30_000)));
+        assert_eq!(queue.next_ready(at(0)), None);
+        assert_eq!(
+            queue.status().last_error.as_deref(),
+            Some("Too many requests.")
+        );
+        // Merged with the other tab's copy, the wait still holds.
+        assert_eq!(
+            Queue::merge(queue, waiting).wake(at(0)),
+            Wake::At(at(30_000))
+        );
     }
 
     #[test]
@@ -1067,5 +1112,37 @@ pub(crate) mod tests {
         // Without a choice, nothing new is written either.
         let json = serde_json::to_value(start(session)).unwrap();
         assert!(json.get("choice").is_none());
+    }
+
+    /// The outbox sends a set exactly as the screen logged it, its prescribed target (#60)
+    /// included, and a stored queue keeps it.
+    #[test]
+    fn a_queued_set_keeps_its_target() {
+        use iron_oxide_domain::Weight;
+        use iron_oxide_domain::progression::{SetGoal, SetTarget};
+        let session = SessionId::new_v7();
+        let Write::SaveSet { set, .. } = set(session, 0) else {
+            unreachable!()
+        };
+        let target = SetTarget {
+            weight: Some(Weight::from_kg(102.5).unwrap()),
+            goal: SetGoal::Reps {
+                reps: Reps::new(5),
+                range: None,
+            },
+        };
+        let write = Write::SaveSet {
+            session_id: session,
+            set: LoggedSet {
+                target: Some(target),
+                ..set
+            },
+        };
+        let mut queue = Queue::default();
+        queue.enqueue(write.clone(), at(3_000));
+        let stored = queue.to_json().unwrap();
+        let (loaded, unreadable) = Queue::from_json(stored);
+        assert!(unreadable.is_empty());
+        assert_eq!(loaded.next_ready(at(3_000)), Some(&write));
     }
 }

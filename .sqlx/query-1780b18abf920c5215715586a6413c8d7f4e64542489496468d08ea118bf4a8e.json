@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT st.session_id, s.started_at, st.reps, st.weight_ng AS \"weight_ng!\", st.warmup\n           FROM workout_sets st\n           JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id\n           WHERE st.user_id = $1 AND st.exercise_id = $2 AND st.weight_ng IS NOT NULL\n             AND s.status <> 'in_progress'\n           ORDER BY s.started_at, s.id, st.completed_at, st.id",
+  "query": "SELECT st.session_id, s.started_at, st.reps, st.weight_ng AS \"weight_ng!\", st.warmup\n           FROM workout_sets st\n           JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id\n           WHERE st.user_id = $1 AND st.exercise_id = $2 AND st.weight_ng IS NOT NULL\n             AND st.duration_s IS NULL AND s.status <> 'in_progress'\n           ORDER BY s.started_at, s.id, st.completed_at, st.id",
   "describe": {
     "columns": [
       {
@@ -43,5 +43,5 @@
       false
     ]
   },
-  "hash": "8b4e76f688e0c7c71bb37c9808c7ec2d0acccf49e15dd3009218bc6eb59e7db9"
+  "hash": "1780b18abf920c5215715586a6413c8d7f4e64542489496468d08ea118bf4a8e"
 }

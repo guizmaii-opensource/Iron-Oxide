@@ -201,6 +201,21 @@ pub fn roll_back(desired: Settings, sent: &Settings, confirmed: &Settings) -> Se
             &sent.sound_enabled,
             &confirmed.sound_enabled,
         ),
+        kg_weight_step: field(
+            desired.kg_weight_step,
+            &sent.kg_weight_step,
+            &confirmed.kg_weight_step,
+        ),
+        lb_weight_step: field(
+            desired.lb_weight_step,
+            &sent.lb_weight_step,
+            &confirmed.lb_weight_step,
+        ),
+        vibration_enabled: field(
+            desired.vibration_enabled,
+            &sent.vibration_enabled,
+            &confirmed.vibration_enabled,
+        ),
     }
 }
 
@@ -217,12 +232,6 @@ impl UserSettings {
         self.state.current.peek().clone()
     }
 
-    /// The user the settings belong to, once loaded.
-    #[must_use]
-    pub fn user(&self) -> Option<UserId> {
-        *self.state.user.read()
-    }
-
     /// Whether loading failed; [`UserSettings::reload`] tries again.
     #[must_use]
     pub fn failed(&self) -> bool {
@@ -231,7 +240,21 @@ impl UserSettings {
 
     /// Loads the settings again.
     pub fn reload(self) {
-        spawn(self.state.load());
+        spawn(self.load());
+    }
+
+    /// Loads the settings, then carries over what this device still kept before #103.
+    async fn load(self) {
+        self.state.load().await;
+        let (Some(user), Some(settings)) = (*self.state.user.peek(), self.peek()) else {
+            return;
+        };
+        if let Some(device) = super::prefs::take_device_prefs(user) {
+            let carried = super::prefs::carry_over(&settings, device);
+            if carried != settings {
+                self.change(|_| carried);
+            }
+        }
     }
 
     /// Changes the settings with `edit`: on screen at once, then saved.
@@ -269,7 +292,7 @@ pub fn use_settings_provider(unit: UnitSetting) -> UserSettings {
         }
         match *state.session.read() {
             SessionStatus::SignedIn => {
-                spawn(state.load());
+                spawn(settings.load());
             }
             SessionStatus::SignedOut => state.clear(),
             SessionStatus::Checking | SessionStatus::Unverified => {}

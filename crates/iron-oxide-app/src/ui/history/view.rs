@@ -11,9 +11,9 @@ use iron_oxide_domain::{
     time::Timestamp,
 };
 
-use super::chart::WeightPoint;
+use super::chart::{VolumePoint, WeightPoint};
 use crate::api::error::FailureKind;
-use crate::api::history::{ExerciseLog, ExerciseSeries, SessionSummary};
+use crate::api::history::{ExerciseSeries, SessionSummary};
 use crate::ui::weight::{estimate_number, estimate_text, weight_number, weight_text};
 
 const MS_PER_MINUTE: i64 = 60_000;
@@ -260,12 +260,6 @@ pub struct SetRow {
     pub failed: bool,
 }
 
-/// The session's total volume: the sum of its exercises' (working sets only).
-#[must_use]
-pub fn session_volume(exercises: &[ExerciseLog]) -> Volume {
-    exercises.iter().map(|log| log.volume).sum()
-}
-
 /// `12 450 kg`: a volume with thin grouping, readable at a glance.
 #[must_use]
 pub fn volume_text(volume: Volume, unit: Unit) -> String {
@@ -289,12 +283,14 @@ fn group_thousands(digits: &str) -> String {
     out
 }
 
-/// The two lines of an exercise's charts, oldest first: the top set's weight, and the best
-/// estimated one-rep max (sessions without an estimate, such as 20-rep sets, have no e1RM point).
+/// The lines of an exercise's charts, oldest first: the top set's weight, the best estimated
+/// one-rep max (sessions without an estimate, such as 20-rep sets, have no e1RM point), and the
+/// session's volume of the exercise.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChartSeries {
     pub top_set: Vec<WeightPoint>,
     pub e1rm: Vec<WeightPoint>,
+    pub volume: Vec<VolumePoint>,
 }
 
 /// The chart lines of `series` (the server sends it oldest first, one point per session).
@@ -310,6 +306,10 @@ pub fn chart_series(series: &ExerciseSeries) -> ChartSeries {
         if let Some(weight) = point.best_e1rm {
             out.e1rm.push(WeightPoint { at_ms, weight });
         }
+        out.volume.push(VolumePoint {
+            at_ms,
+            volume: point.volume,
+        });
     }
     out
 }
@@ -350,6 +350,8 @@ pub struct SeriesRow {
     pub top_set: String,
     /// `116.5 kg` (rounded like every estimate), or `—` without an estimate.
     pub e1rm: String,
+    /// `2 500 kg`.
+    pub volume: String,
 }
 
 #[must_use]
@@ -369,6 +371,7 @@ pub fn series_rows(series: &ExerciseSeries, unit: Unit) -> Vec<SeriesRow> {
             e1rm: point
                 .best_e1rm
                 .map_or_else(|| "—".to_owned(), |weight| estimate_text(weight, unit)),
+            volume: volume_text(point.volume, unit),
         })
         .collect()
 }
@@ -383,32 +386,51 @@ pub fn chart_summary(
     unit: Unit,
     date: impl Fn(i64) -> String,
 ) -> String {
-    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+    let values: Vec<(i64, Weight)> = points.iter().map(|p| (p.at_ms, p.weight)).collect();
+    line_summary(what, &values, |weight| measure.text(weight, unit), date)
+}
+
+/// [`chart_summary`] for a volume line.
+#[must_use]
+pub fn volume_summary(
+    what: &str,
+    points: &[VolumePoint],
+    unit: Unit,
+    date: impl Fn(i64) -> String,
+) -> String {
+    let values: Vec<(i64, Volume)> = points.iter().map(|p| (p.at_ms, p.volume)).collect();
+    line_summary(what, &values, |volume| volume_text(volume, unit), date)
+}
+
+fn line_summary<T: Copy + Ord>(
+    what: &str,
+    points: &[(i64, T)],
+    text: impl Fn(T) -> String,
+    date: impl Fn(i64) -> String,
+) -> String {
+    let (Some(&(first_at, first)), Some(&(last_at, last))) = (points.first(), points.last()) else {
         return format!("{what}: no data yet.");
     };
-    let best = points
+    let (best_at, best) = points
         .iter()
-        .max_by_key(|point| point.weight)
-        .unwrap_or(last);
+        .copied()
+        .max_by_key(|&(_, value)| value)
+        .unwrap_or((last_at, last));
     let sessions = match points.len() {
         1 => "1 session".to_owned(),
         count => format!("{count} sessions"),
     };
     if points.len() == 1 {
-        return format!(
-            "{what}: {} on {}, {sessions}.",
-            measure.text(first.weight, unit),
-            date(first.at_ms)
-        );
+        return format!("{what}: {} on {}, {sessions}.", text(first), date(first_at));
     }
     format!(
         "{what} over {sessions}, from {} on {} to {} on {}. Best {} on {}.",
-        measure.text(first.weight, unit),
-        date(first.at_ms),
-        measure.text(last.weight, unit),
-        date(last.at_ms),
-        measure.text(best.weight, unit),
-        date(best.at_ms),
+        text(first),
+        date(first_at),
+        text(last),
+        date(last_at),
+        text(best),
+        date(best_at),
     )
 }
 
@@ -420,13 +442,31 @@ pub fn latest_number(points: &[WeightPoint], measure: Measure, unit: Unit) -> Op
         .map(|point| measure.number(point.weight, unit))
 }
 
+/// The latest volume, for the big number above the volume chart: `3 625`.
+#[must_use]
+pub fn latest_volume(points: &[VolumePoint], unit: Unit) -> Option<String> {
+    points
+        .last()
+        .map(|point| group_thousands(&point.volume.format_value(unit, 0)))
+}
+
+/// The day's name: as the session's program version named it, else from the names known to the
+/// app, else the slug.
+#[must_use]
+pub fn day_name(session: &SessionSummary, names: &Names) -> String {
+    session
+        .day_name
+        .clone()
+        .unwrap_or_else(|| names.day(session.program_id, &session.day_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use iron_oxide_domain::entitlements::{FeatureAccess, Plan};
-    use iron_oxide_domain::{Lift, ProgramVersionId, Reps, Seconds, SeriesPoint, SetId};
+    use iron_oxide_domain::{Lift, ProgramVersionId, Reps, Seconds, SetId};
 
-    use crate::api::history::SeriesKey;
+    use crate::api::history::{ExercisePoint, SeriesKey};
 
     fn kg(value: f64) -> Weight {
         Weight::from_kg(value).unwrap()
@@ -552,9 +592,12 @@ mod tests {
             program_version: 1,
             day_id: DayId::new("a").unwrap(),
             status: SessionStatus::Completed,
+            day_name: None,
             started_at: ts(0),
             finished_at: Some(ts(1)),
             working_sets: 0,
+            volume: Volume::ZERO,
+            set_pr: false,
         }
     }
 
@@ -584,6 +627,7 @@ mod tests {
             duration: duration.map(Seconds::new),
             warm_up,
             completed_at: ts(0),
+            target: None,
         }
     }
 
@@ -611,16 +655,6 @@ mod tests {
         );
     }
 
-    fn log(sets: Vec<LoggedSet<Timestamp>>) -> ExerciseLog {
-        ExerciseLog {
-            exercise_id: ExerciseId::new("back-squat").unwrap(),
-            sets,
-            top_set: None,
-            best_e1rm: None,
-            volume: Volume::ZERO,
-        }
-    }
-
     #[test]
     fn warm_ups_come_first_and_are_numbered_apart() {
         let rows = set_rows(
@@ -639,19 +673,6 @@ mod tests {
     }
 
     #[test]
-    fn session_volume_sums_the_exercises() {
-        let mut a = log(Vec::new());
-        a.volume = Volume::of(kg(100.0), Reps::new(5));
-        let mut b = log(Vec::new());
-        b.volume = Volume::of(kg(50.0), Reps::new(10));
-        assert_eq!(
-            session_volume(&[a, b]),
-            Volume::of(kg(1000.0), Reps::new(1))
-        );
-        assert_eq!(session_volume(&[]), Volume::ZERO);
-    }
-
-    #[test]
     fn volumes_are_grouped_by_thousands() {
         let volume = Volume::of(kg(249.0), Reps::new(50));
         assert_eq!(volume_text(volume, Unit::Kg), "12\u{202f}450 kg");
@@ -667,7 +688,7 @@ mod tests {
     }
 
     fn series() -> ExerciseSeries {
-        let point = |n: u128, ms: i64, weight: f64, reps: u16, e1rm: Option<f64>| SeriesPoint {
+        let point = |n: u128, ms: i64, weight: f64, reps: u16, e1rm: Option<f64>| ExercisePoint {
             key: SeriesKey {
                 started_at: ts(ms),
                 session_id: SessionId::from_uuid(uuid(n)),
@@ -677,6 +698,8 @@ mod tests {
                 reps: Reps::new(reps),
             },
             best_e1rm: e1rm.map(kg),
+            // As if the top set was the only working set.
+            volume: Volume::of(kg(weight), Reps::new(reps)),
         };
         ExerciseSeries {
             exercise_id: ExerciseId::new("back-squat").unwrap(),
@@ -793,5 +816,39 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_volume_line_has_a_point_per_session() {
+        let lines = chart_series(&series());
+        let volume: Vec<_> = lines.volume.iter().map(|p| (p.at_ms, p.volume)).collect();
+        assert_eq!(
+            volume,
+            [
+                (1_000, Volume::of(kg(100.0), Reps::new(5))),
+                (2_000, Volume::of(kg(60.0), Reps::new(20))),
+                (3_000, Volume::of(kg(105.0), Reps::new(5))),
+            ]
+        );
+        let rows = series_rows(&series(), Unit::Kg);
+        assert_eq!(rows[0].volume, "525 kg");
+        assert_eq!(rows[1].volume, "1\u{202f}200 kg");
+        let date = |ms: i64| format!("t{ms}");
+        assert_eq!(
+            volume_summary("Volume", &lines.volume, Unit::Kg, date),
+            "Volume over 3 sessions, from 500 kg on t1000 to 525 kg on t3000. \
+             Best 1\u{202f}200 kg on t2000."
+        );
+        assert_eq!(latest_volume(&lines.volume, Unit::Kg).unwrap(), "525");
+        assert_eq!(latest_volume(&[], Unit::Kg), None);
+    }
+
+    #[test]
+    fn the_day_is_named_by_the_sessions_version_first() {
+        let mut session = summary(1);
+        let names = Names::default();
+        assert_eq!(day_name(&session, &names), "A");
+        session.day_name = Some("Heavy day".to_owned());
+        assert_eq!(day_name(&session, &names), "Heavy day");
     }
 }

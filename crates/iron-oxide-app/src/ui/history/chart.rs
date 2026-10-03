@@ -8,7 +8,7 @@
 //! weight in the user's unit (so that the ticks fall on round numbers of *that* unit), and the
 //! pixel coordinates.
 
-use iron_oxide_domain::{Unit, Weight};
+use iron_oxide_domain::{Unit, Volume, Weight};
 
 /// The size of the chart's `viewBox`. 320 wide is the inner width of a card on a 390 px phone, so
 /// text in the SVG shows at about its nominal size there.
@@ -29,6 +29,20 @@ const MAX_TICKS: usize = 5;
 pub struct WeightPoint {
     pub at_ms: i64,
     pub weight: Weight,
+}
+
+/// One point of a volume chart: when (ms since the epoch) and how much weight × reps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolumePoint {
+    pub at_ms: i64,
+    pub volume: Volume,
+}
+
+/// A point as plotted: when, and the value in the user's unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ValuePoint {
+    pub at_ms: i64,
+    pub value: f64,
 }
 
 /// A linear map from a value range (the domain) to a pixel range.
@@ -184,15 +198,47 @@ pub fn layout(
     unit: Unit,
     date_label: impl Fn(i64) -> String,
 ) -> Option<ChartLayout> {
+    let values: Vec<ValuePoint> = points
+        .iter()
+        .map(|point| ValuePoint {
+            at_ms: point.at_ms,
+            value: point.weight.value_in(unit),
+        })
+        .collect();
+    layout_values(&values, min_tick_step(unit), date_label)
+}
+
+/// Lays out a volume line (oldest first) in `unit`·reps, with whole-unit ticks at least.
+#[must_use]
+pub fn volume_layout(
+    points: &[VolumePoint],
+    unit: Unit,
+    date_label: impl Fn(i64) -> String,
+) -> Option<ChartLayout> {
+    let values: Vec<ValuePoint> = points
+        .iter()
+        .map(|point| ValuePoint {
+            at_ms: point.at_ms,
+            value: point.volume.value_in(unit),
+        })
+        .collect();
+    layout_values(&values, 1.0, date_label)
+}
+
+/// Lays out `points` (oldest first, values in the user's unit), with y ticks at least `min_step`
+/// apart. `None` for no points.
+#[must_use]
+pub fn layout_values(
+    points: &[ValuePoint],
+    min_step: f64,
+    date_label: impl Fn(i64) -> String,
+) -> Option<ChartLayout> {
     let first = points.first()?;
     let last = points.last()?;
-    let values: Vec<f64> = points
-        .iter()
-        .map(|point| point.weight.value_in(unit))
-        .collect();
+    let values: Vec<f64> = points.iter().map(|point| point.value).collect();
     let min = values.iter().copied().fold(f64::INFINITY, f64::min);
     let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let ticks = y_ticks(min, max, min_tick_step(unit));
+    let ticks = y_ticks(min, max, min_step);
     let (low, high) = (
         ticks.first().copied().unwrap_or(min),
         ticks.last().copied().unwrap_or(max),
@@ -483,5 +529,52 @@ mod tests {
         ];
         let chart = layout(&points, Unit::Kg, day_label).unwrap();
         assert_eq!(chart.x_ticks.len(), 1);
+    }
+
+    #[test]
+    fn volume_lines_use_the_same_layout_in_the_users_unit() {
+        let points = [
+            VolumePoint {
+                at_ms: 0,
+                volume: Volume::of(kg(100.0), iron_oxide_domain::Reps::new(25)),
+            },
+            VolumePoint {
+                at_ms: 7 * 86_400_000,
+                volume: Volume::of(kg(110.0), iron_oxide_domain::Reps::new(25)),
+            },
+        ];
+        // 2500 to 2750 kg.
+        let chart = volume_layout(&points, Unit::Kg, day_label).unwrap();
+        let labels: Vec<_> = chart
+            .y_ticks
+            .iter()
+            .map(|tick| tick.label.as_str())
+            .collect();
+        assert_eq!(labels, ["2500", "2600", "2700", "2800"]);
+        assert!(chart.dots[0].y > chart.dots[1].y);
+        assert!(volume_layout(&[], Unit::Kg, day_label).is_none());
+        // The same volume in pounds is 5511.56 to 6062.72 lb·reps: ticks in whole pounds.
+        let in_lb = volume_layout(&points, Unit::Lb, day_label).unwrap();
+        assert!(
+            in_lb.y_ticks.iter().all(|tick| !tick.label.contains('.')),
+            "{:?}",
+            in_lb.y_ticks
+        );
+        let first: f64 = in_lb.y_ticks[0].label.parse().unwrap();
+        assert!(first <= 5511.56);
+    }
+
+    #[test]
+    fn a_flat_volume_line_never_gets_fractional_ticks() {
+        let points = [VolumePoint {
+            at_ms: 0,
+            volume: Volume::of(kg(10.0), iron_oxide_domain::Reps::new(1)),
+        }];
+        let chart = volume_layout(&points, Unit::Kg, day_label).unwrap();
+        assert!(
+            chart.y_ticks.iter().all(|tick| !tick.label.contains('.')),
+            "{:?}",
+            chart.y_ticks
+        );
     }
 }

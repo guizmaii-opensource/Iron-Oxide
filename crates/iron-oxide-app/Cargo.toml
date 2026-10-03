@@ -29,6 +29,7 @@ web-sys = { workspace = true, optional = true, features = [
   "AudioParam",
   "BaseAudioContext",
   "BroadcastChannel",
+  "Clipboard",
   "CredentialCreationOptions",
   "CredentialRequestOptions",
   "CredentialsContainer",

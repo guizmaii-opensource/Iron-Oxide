@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_settings\n             (user_id, unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled,\n              kg_weight_step_ng, lb_weight_step_ng, vibration_enabled)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n         ON CONFLICT (user_id) DO UPDATE SET\n             unit = EXCLUDED.unit,\n             bar_weight_ng = EXCLUDED.bar_weight_ng,\n             plate_inventory = EXCLUDED.plate_inventory,\n             default_rest_s = EXCLUDED.default_rest_s,\n             sound_enabled = EXCLUDED.sound_enabled,\n             kg_weight_step_ng = EXCLUDED.kg_weight_step_ng,\n             lb_weight_step_ng = EXCLUDED.lb_weight_step_ng,\n             vibration_enabled = EXCLUDED.vibration_enabled,\n             updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Jsonb",
+        "Int8",
+        "Bool",
+        "Int8",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bfaba0132444fb685f78b6cf2ba4d25d2282f630cc50713a7732a799aa8598f0"
+}

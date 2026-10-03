@@ -26,7 +26,9 @@ use iron_oxide_domain::{
     DayId, E1rmFormula, ExerciseId, LoggedSet, PerformedSet, Reps, Seconds, Session, SessionId,
     SessionLog, SessionOutcome, SessionStatus, Unit, Weight, detect_prs, next_day,
     program::{Load, Program},
-    progression::{NextTargets, Prescription, ProgressionSettings, exercise_history, next_targets},
+    progression::{
+        NextTargets, Prescription, ProgressionSettings, SetTarget, exercise_history, next_targets,
+    },
     session_volume,
     time::Timestamp,
 };
@@ -334,7 +336,7 @@ async fn summary(
             sets.iter()
                 .filter(|set| &set.exercise == exercise)
                 .filter_map(performed),
-            E1rmFormula::default(),
+            E1rmFormula::STANDARD,
         ));
     }
 
@@ -633,6 +635,30 @@ fn domain_set(set: &db::sets::LoggedSet) -> Result<LoggedSet<Timestamp>, ApiErro
         duration: set.duration_s.map(Seconds::new),
         warm_up: set.warmup,
         completed_at: timestamp(set.completed_at)?,
+        target: set.target.as_ref().map(domain_target).transpose()?,
+    })
+}
+
+/// A stored target (#60) as the domain's [`SetTarget`]. It was checked when it was saved, so a
+/// failure means the stored data is wrong.
+pub(super) fn domain_target(target: &db::sets::Target) -> Result<SetTarget, ApiError> {
+    Ok(SetTarget {
+        weight: target
+            .weight_ng
+            .map(Weight::from_nanograms)
+            .transpose()
+            .map_err(ApiError::internal)?,
+        goal: serde_json::from_value(target.goal.clone()).map_err(ApiError::internal)?,
+    })
+}
+
+/// A target sent by the client, for the repository. It is what the client says it showed: the
+/// server checks its types (when the set is decoded), not its values, which only ever move the
+/// sender's own progression.
+pub(super) fn stored_target(target: &SetTarget) -> Result<db::sets::Target, ApiError> {
+    Ok(db::sets::Target {
+        weight_ng: target.weight.map(Weight::as_nanograms),
+        goal: serde_json::to_value(target.goal).map_err(ApiError::internal)?,
     })
 }
 
@@ -651,6 +677,7 @@ fn repo_set(
         duration_s: set.duration.map(Seconds::get),
         warmup: set.warm_up,
         completed_at: offset_date_time(set.completed_at)?,
+        target: set.target.as_ref().map(stored_target).transpose()?,
     })
 }
 
@@ -833,6 +860,7 @@ mod tests {
             duration: None,
             warm_up: false,
             completed_at: at,
+            target: None,
         }
     }
 
@@ -1732,6 +1760,92 @@ mod tests {
             stored[0].weight_ng,
             kg(100.0).as_nanograms(),
             "never stored back"
+        );
+    }
+
+    /// #60: a set is saved with the target it was shown, read back with it, and a training max
+    /// session is judged against that target exactly. 77.5 kg lifted against an exact 80 kg is
+    /// outside the legacy 1.25 kg tolerance: logged with a 77.5 kg target, the session is a
+    /// success; logged without a target, a failure. Same id with another target: `409`.
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn sets_keep_their_target_and_are_judged_against_it(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let (mut a, mut b) = (api.user("A").await, api.user("B").await);
+        let shown = iron_oxide_domain::progression::SetTarget {
+            weight: Some(kg(77.5)),
+            goal: iron_oxide_domain::progression::SetGoal::Reps {
+                reps: Reps::new(5),
+                range: None,
+            },
+        };
+        let mut changes = Vec::new();
+        for (user, target) in [(&mut a, Some(shown)), (&mut b, None)] {
+            active_program(&api, user).await;
+            training_maxes::set(
+                &api.db,
+                user.id,
+                &training_maxes::TrainingMax {
+                    exercise_id: "bench-press".to_owned(),
+                    weight_ng: kg(100.0).as_nanograms(),
+                    set_at: offset_date_time(t(-10)).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+            squat_session(user, 0, 5, 100.0, SessionOutcome::Completed).await;
+            let id = SessionId::new_v7();
+            start(user, id, t(60)).await.unwrap();
+            for index in 0..3 {
+                let logged = LoggedSet {
+                    target,
+                    ..set(bench(), index, 5, 77.5, t(61 + i64::from(index)))
+                };
+                // Retried: one row, unchanged.
+                save(user, id, &logged).await.unwrap();
+                save(user, id, &logged).await.unwrap();
+                if target.is_some() {
+                    let other = LoggedSet {
+                        target: None,
+                        ..logged.clone()
+                    };
+                    assert_status(save(user, id, &other).await, StatusCode::CONFLICT);
+                }
+            }
+            let current: Option<SessionWithSets> =
+                call(user, IN_PROGRESS, json!({})).await.unwrap();
+            let bench_sets: Vec<_> = current
+                .unwrap()
+                .sets
+                .into_iter()
+                .filter(|set| set.exercise == bench())
+                .collect();
+            assert_eq!(bench_sets.len(), 3);
+            assert!(bench_sets.iter().all(|set| set.target == target));
+            let summary = finish(user, id, SessionOutcome::Completed, t(70))
+                .await
+                .unwrap();
+            changes.push(
+                summary
+                    .changes
+                    .into_iter()
+                    .find(|change| change.exercise == bench())
+                    .unwrap()
+                    .kind,
+            );
+        }
+        assert_eq!(
+            changes,
+            [
+                ChangeKind::TrainingMaxIncrease {
+                    from: kg(100.0),
+                    to: kg(102.5)
+                },
+                ChangeKind::TrainingMaxUnchanged {
+                    training_max: kg(100.0),
+                    failed_sessions: 1
+                },
+            ]
         );
     }
 

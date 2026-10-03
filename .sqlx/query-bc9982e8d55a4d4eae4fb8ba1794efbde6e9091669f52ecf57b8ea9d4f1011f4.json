@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled,\n                kg_weight_step_ng, lb_weight_step_ng, vibration_enabled, updated_at\n         FROM user_settings WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "unit",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "bar_weight_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "plate_inventory",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "default_rest_s",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "sound_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "kg_weight_step_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "lb_weight_step_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "vibration_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bc9982e8d55a4d4eae4fb8ba1794efbde6e9091669f52ecf57b8ea9d4f1011f4"
+}

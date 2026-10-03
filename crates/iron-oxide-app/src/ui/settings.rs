@@ -12,7 +12,7 @@ use iron_oxide_domain::{
 use super::account::Account;
 use super::components::{Button, ButtonVariant, Card, Chip, LoadingState, Stepper, WeightStepper};
 use super::errors::{BannerKind, use_errors};
-use super::prefs::{DevicePrefs, step_choices, use_device_prefs};
+use super::prefs::step_choices;
 use super::shell::{SessionStatus, use_session};
 use super::user_settings::{UserSettings, use_user_settings};
 use super::weight::weight_text;
@@ -274,11 +274,10 @@ fn OnOff(#[props(into)] label: String, on: bool, on_change: EventHandler<bool>) 
 
 #[component]
 fn UnitsCard(settings: Settings, editor: Editor) -> Element {
-    let prefs = use_device_prefs();
     let unit = settings.unit;
     // Set when the unit was just switched and the bar and plates are not the new unit's.
     let mut offer_standard = use_signal(|| false);
-    let step = prefs.get().weight_step(unit);
+    let step = settings.weight_step(unit);
     rsx! {
         Card { title: "Units",
             div { class: "io-setting",
@@ -322,10 +321,7 @@ fn UnitsCard(settings: Settings, editor: Editor) -> Element {
                 }
             }
             div { class: "io-setting",
-                span { class: "io-setting-name",
-                    "Weight step"
-                    span { class: "io-muted io-setting-note", " · this device" }
-                }
+                span { class: "io-setting-name", "Weight step" }
                 div { class: "io-chips", role: "group", aria_label: "Weight step",
                     for value in step_choices(unit).iter().copied() {
                         if let Ok(choice) = Weight::new(value, unit) {
@@ -333,8 +329,7 @@ fn UnitsCard(settings: Settings, editor: Editor) -> Element {
                                 key: "{value}",
                                 selected: choice == step,
                                 onclick: move |_| {
-                                    let new = prefs.peek().with_weight_step(unit, choice);
-                                    prefs.save(new);
+                                    editor.change(|settings| settings.with_weight_step(unit, choice));
                                 },
                                 "{weight_text(choice, unit)}"
                             }
@@ -531,9 +526,7 @@ fn PlateRow(unit: Unit, stock: PlateStock, last: bool, editor: Editor) -> Elemen
 
 #[component]
 fn RestCard(settings: Settings, editor: Editor) -> Element {
-    let prefs = use_device_prefs();
     let rest = settings.default_rest;
-    let vibration = prefs.get().vibration;
     rsx! {
         Card { title: "Rest timer",
             Stepper {
@@ -558,13 +551,11 @@ fn RestCard(settings: Settings, editor: Editor) -> Element {
             }
             OnOff {
                 label: "Vibration",
-                on: vibration,
-                on_change: move |vibration| {
-                    let new = DevicePrefs { vibration, ..prefs.peek() };
-                    prefs.save(new);
+                on: settings.vibration_enabled,
+                on_change: move |vibration_enabled| {
+                    editor.change(|settings| Settings { vibration_enabled, ..settings });
                 },
             }
-            p { class: "io-muted io-hint", "Vibration and the weight step are saved on this device only." }
         }
     }
 }
