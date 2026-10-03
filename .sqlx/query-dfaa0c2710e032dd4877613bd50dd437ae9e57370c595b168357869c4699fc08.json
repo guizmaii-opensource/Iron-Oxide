@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, v.program_id, p.name AS program_name, s.program_version_id,\n                  v.version AS program_version, s.day_id, s.status, s.started_at, s.finished_at,\n                  (SELECT count(*) FROM workout_sets st\n                   WHERE st.user_id = s.user_id AND st.session_id = s.id AND NOT st.warmup)\n                      AS \"working_sets!\"\n           FROM workout_sessions s\n           JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id\n           JOIN programs p ON p.id = v.program_id AND p.user_id = s.user_id\n           WHERE s.user_id = $1 AND s.status <> 'in_progress'\n             AND ($2::timestamptz IS NULL OR (s.finished_at, s.id) < ($2, $3::uuid))\n           ORDER BY s.finished_at DESC, s.id DESC\n           LIMIT $4",
+  "query": "SELECT s.id, v.program_id, p.name AS program_name, s.program_version_id,\n                  v.version AS program_version, s.day_id,\n                  (SELECT d ->> 'name' FROM jsonb_array_elements(v.document -> 'days') d\n                   WHERE d ->> 'id' = s.day_id LIMIT 1) AS day_name,\n                  s.status, s.started_at, s.finished_at,\n                  (SELECT count(*) FROM workout_sets st\n                   WHERE st.user_id = s.user_id AND st.session_id = s.id AND NOT st.warmup)\n                      AS \"working_sets!\"\n           FROM workout_sessions s\n           JOIN program_versions v ON v.id = s.program_version_id AND v.user_id = s.user_id\n           JOIN programs p ON p.id = v.program_id AND p.user_id = s.user_id\n           WHERE s.user_id = $1 AND s.status <> 'in_progress'\n             AND ($2::timestamptz IS NULL OR (s.finished_at, s.id) < ($2, $3::uuid))\n           ORDER BY s.finished_at DESC, s.id DESC\n           LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -35,21 +35,26 @@
       },
       {
         "ordinal": 6,
-        "name": "status",
+        "name": "day_name",
         "type_info": "Text"
       },
       {
         "ordinal": 7,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "finished_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "working_sets!",
         "type_info": "Int8"
       }
@@ -69,11 +74,12 @@
       false,
       false,
       false,
+      null,
       false,
       false,
       true,
       null
     ]
   },
-  "hash": "ddc6fd9f43ab8a711e789d4528b2a2389581586daccdda7e711e925ac4331096"
+  "hash": "dfaa0c2710e032dd4877613bd50dd437ae9e57370c595b168357869c4699fc08"
 }

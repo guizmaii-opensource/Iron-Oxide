@@ -360,10 +360,16 @@ Epley formula.
 
 | Path | Arguments | Result |
 |---|---|---|
-| `/api/history/page` | `cursor: Option<HistoryCursor>`, `limit: Option<u32>` (default 20, 1 to 100) | `HistoryPage { sessions, next }`: ended sessions, most recently finished first (ties by id, descending). `next` is `None` on the last page. |
-| `/api/history/session` | `session_id` | `SessionDetails`: the session (ended or still in progress) and its sets grouped by exercise (in the order each was first logged), with each exercise's top set, best e1RM and volume. |
-| `/api/history/exercise-series` | `exercise_id` (a slug) | `ExerciseSeries`: one point per ended session with a weighted working set, oldest first: the top set and the best e1RM. |
+| `/api/history/page` | `cursor: Option<HistoryCursor>`, `limit: Option<u32>` (default 20, 1 to 100) | `HistoryPage { sessions, next }`: ended sessions, most recently finished first (ties by id, descending). `next` is `None` on the last page. Each `SessionSummary` carries `day_name` (from the session's own program version), `volume` (working sets, as the end-of-session summary counts it) and `set_pr` (see below). |
+| `/api/history/session` | `session_id` | `SessionDetails`: the session (ended or still in progress) and its sets grouped by exercise (in the order each was first logged), with each exercise's top set, best e1RM and volume. The session's `day_name`, `volume` and `set_pr` are the list's. |
+| `/api/history/exercise-series` | `exercise_id` (a slug) | `ExerciseSeries`: one `ExercisePoint` per ended session with a weighted working set, oldest first: the top set, the best e1RM and the exercise's volume in that session. Timed sets (holds) are left out. |
 | `/api/history/exercises` | none | The exercises logged in ended sessions, most recently trained first, with the number of sessions. |
+
+**PR flags.** `set_pr` is true exactly when the session's end-of-session summary reports a personal
+record: only completed sessions, against the sets of the user's completed sessions started before it
+(`ExerciseRecords`, Epley). A page costs three queries whatever its size: the page, its sets
+(`sets::list_for_sessions`), and the record history of the exercises it logged up to its latest
+completed session (`sets::completed_for_exercises_before`), replayed in order.
 
 - **Cursor.** `HistoryCursor` is opaque to the client: pass back the `next` of the previous page.
   It holds the last session's `finished_at` in **microseconds** (the database's precision) and its

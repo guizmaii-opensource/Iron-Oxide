@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,\n                completed_at\n         FROM workout_sets WHERE user_id = $1 AND session_id = ANY($2)\n         ORDER BY completed_at, id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "session_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "exercise_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "set_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "reps",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "weight_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "duration_s",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "warmup",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "a64bcb2b1811dfa1c9cd74b2779e94b3055f27af48c624ec2298ec3f5acb08bb"
+}

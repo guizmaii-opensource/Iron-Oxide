@@ -4,12 +4,13 @@
 use dioxus::prelude::*;
 
 use super::progress::LockedCharts;
-use super::view::{append_page, duration_text, status_label};
+use super::view::{append_page, day_name, duration_text, status_label, volume_text};
 use super::{ChartAccess, HistoryContext, local_date, use_history};
 use crate::api::history::{HistoryCursor, SessionSummary, history_page, logged_exercises};
 use crate::ui::components::{Button, ButtonVariant, Card, EmptyState, LoadingState};
 use crate::ui::errors::{Errors, use_errors};
 use crate::ui::shell::Route;
+use crate::ui::weight::use_unit;
 
 /// Where the list of sessions is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,11 +149,9 @@ fn Sessions(pages: Pages) -> Element {
 #[component]
 fn SessionRow(session: SessionSummary) -> Element {
     let history = use_history();
+    let unit = use_unit();
     let date = local_date(session.started_at.epoch_millis()).long();
-    let day = history
-        .names
-        .read()
-        .day(session.program_id, &session.day_id);
+    let day = day_name(&session, &history.names.read());
     let mut meta = vec![session.program_name.clone()];
     if let Some(duration) = duration_text(session.started_at, session.finished_at) {
         meta.push(duration);
@@ -161,6 +160,9 @@ fn SessionRow(session: SessionSummary) -> Element {
         1 => "1 set".to_owned(),
         count => format!("{count} sets"),
     });
+    if !session.volume.is_zero() {
+        meta.push(volume_text(session.volume, unit));
+    }
     let meta = meta.join(" · ");
     let status = status_label(session.status);
 
@@ -172,12 +174,26 @@ fn SessionRow(session: SessionSummary) -> Element {
                 span { class: "io-history-date", "{date}" }
                 span { class: "io-history-day",
                     "{day}"
+                    if session.set_pr {
+                        PrBadge {}
+                    }
                     if let Some(status) = status {
                         span { class: "io-chip io-status-chip", "{status}" }
                     }
                 }
                 span { class: "io-history-meta", "{meta}" }
             }
+        }
+    }
+}
+
+/// The badge of a session that set a personal record.
+#[component]
+pub fn PrBadge() -> Element {
+    rsx! {
+        span { class: "io-pr-badge",
+            span { "aria-hidden": "true", "PR" }
+            span { class: "io-sr-only", "Personal record" }
         }
     }
 }

@@ -3,7 +3,8 @@
 use dioxus::prelude::*;
 use iron_oxide_domain::SessionId;
 
-use super::view::{duration_text, session_volume, set_rows, status_label, volume_text};
+use super::list::PrBadge;
+use super::view::{day_name, duration_text, set_rows, status_label, volume_text};
 use super::{BackToHistory, ChartAccess, local_date, use_history};
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::api::history::{ExerciseLog, SessionDetails, session_details};
@@ -65,13 +66,10 @@ fn Session(details: SessionDetails) -> Element {
     let unit = use_unit();
     let session = &details.session;
     let date = local_date(session.started_at.epoch_millis()).long();
-    let day = history
-        .names
-        .read()
-        .day(session.program_id, &session.day_id);
+    let day = day_name(session, &history.names.read());
     let duration =
         duration_text(session.started_at, session.finished_at).unwrap_or_else(|| "—".to_owned());
-    let volume = volume_text(session_volume(&details.exercises), unit);
+    let volume = volume_text(session.volume, unit);
     let sets = session.working_sets;
     let status = status_label(session.status);
     let program = format!(
@@ -83,8 +81,12 @@ fn Session(details: SessionDetails) -> Element {
         div { class: "io-page-header",
             span { class: "io-label", "{date}" }
             h1 { class: "io-title", "{day}" }
-            p { class: "io-muted",
+            p { class: "io-muted io-session-meta",
                 "{program}"
+                if session.set_pr {
+                    " "
+                    PrBadge {}
+                }
                 if let Some(status) = status {
                     " "
                     span { class: "io-chip io-status-chip", "{status}" }

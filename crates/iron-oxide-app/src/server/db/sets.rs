@@ -349,6 +349,30 @@ pub async fn completed_in_program(
     .collect()
 }
 
+/// The user's sets of the sessions `sessions` (warm-ups included), in completion order (then by
+/// id). One query for a whole history page; sessions that are not the user's add nothing.
+pub async fn list_for_sessions(
+    pool: &PgPool,
+    user: UserId,
+    sessions: &[SessionId],
+) -> Result<Vec<LoggedSet>, RepoError> {
+    let ids: Vec<Uuid> = sessions.iter().map(|id| id.as_uuid()).collect();
+    sqlx::query_as!(
+        SetRow,
+        "SELECT id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,
+                completed_at
+         FROM workout_sets WHERE user_id = $1 AND session_id = ANY($2)
+         ORDER BY completed_at, id",
+        user.as_uuid(),
+        &ids,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(LoggedSet::try_from)
+    .collect()
+}
+
 /// The user's sets of `exercises` (warm-ups included) in **completed** sessions of any program
 /// that started strictly before `before` (by start, then id); oldest first. The personal-record
 /// history of a session's summary (#18), which only depends on what came before it, so a retried

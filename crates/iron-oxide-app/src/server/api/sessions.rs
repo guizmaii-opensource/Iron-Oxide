@@ -299,7 +299,7 @@ async fn summary(
             sets.iter()
                 .filter(|set| &set.exercise == exercise)
                 .filter_map(performed),
-            E1rmFormula::default(),
+            E1rmFormula::STANDARD,
         ));
     }
 

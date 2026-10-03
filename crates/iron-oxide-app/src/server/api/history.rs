@@ -1,20 +1,28 @@
 //! History (#20): the logic behind `crate::api::history`.
 
+use std::collections::{HashMap, HashSet};
+
 use iron_oxide_domain::{
-    DayId, E1rmFormula, ExerciseId, LoggedSet, PerformedSet, Reps, Seconds, SeriesPoint, SessionId,
-    Weight, exercise_series, session_volume, time::Timestamp, top_set,
+    DayId, E1rmFormula, ExerciseId, ExerciseRecords, LoggedSet, PerformedSet, Reps, Seconds,
+    SessionId, Volume, Weight, exercise_series, session_volume, time::Timestamp, top_set,
 };
 use sqlx::{PgPool, types::time::OffsetDateTime};
 
 use super::{ApiError, sessions::status, timestamp};
 use crate::api::history::{
-    DEFAULT_PAGE_SIZE, ExerciseLog, ExerciseSeries, HistoryCursor, HistoryPage, LoggedExercise,
-    MAX_PAGE_SIZE, SeriesKey, SessionDetails, SessionSummary,
+    DEFAULT_PAGE_SIZE, ExerciseLog, ExercisePoint, ExerciseSeries, HistoryCursor, HistoryPage,
+    LoggedExercise, MAX_PAGE_SIZE, SeriesKey, SessionDetails, SessionSummary,
 };
-use crate::server::db::{history as repo, ids::UserId, sets};
+use crate::server::db::{
+    history as repo,
+    ids::{self, UserId},
+    sessions::{Cursor, SessionStatus as StoredStatus},
+    sets,
+};
 
-/// The formula of every e1RM in the history.
-const FORMULA: E1rmFormula = E1rmFormula::Epley;
+/// The formula of every e1RM in the history: the end-of-session summary's, so the history's PR
+/// flags and estimates always agree with it.
+const FORMULA: E1rmFormula = E1rmFormula::STANDARD;
 /// Nanoseconds in a microsecond, the database's time precision.
 const NANOS_PER_MICRO: i128 = 1_000;
 
@@ -41,7 +49,20 @@ pub async fn page(
     } else {
         None
     };
-    let sessions = entries.into_iter().map(summary).collect::<Result<_, _>>()?;
+    // Three queries per page, whatever its size: the page, its sets, the record history.
+    let ids: Vec<ids::SessionId> = entries.iter().map(|entry| entry.id).collect();
+    let sets = by_session(sets::list_for_sessions(pool, owner, &ids).await?)?;
+    let prs = sessions_with_prs(pool, owner, &entries, &sets).await?;
+    let sessions = entries
+        .into_iter()
+        .map(|entry| {
+            let volume = sets
+                .get(&entry.id)
+                .map_or(Volume::ZERO, |sets| volume(sets));
+            let set_pr = prs.contains(&entry.id);
+            summary(entry, volume, set_pr)
+        })
+        .collect::<Result<_, _>>()?;
     Ok(HistoryPage { sessions, next })
 }
 
@@ -52,10 +73,15 @@ pub async fn details(
 ) -> Result<SessionDetails, ApiError> {
     let id = session_id.into();
     let entry = repo::entry(pool, owner, id).await?;
-    let sets = sets::list_for_session(pool, owner, id).await?;
+    let stored = sets::list_for_session(pool, owner, id).await?;
+    let exercises = group_by_exercise(stored.clone())?;
+    let sets = by_session(stored)?;
+    let prs = sessions_with_prs(pool, owner, std::slice::from_ref(&entry), &sets).await?;
+    let set_pr = prs.contains(&entry.id);
+    let volume = exercises.iter().map(|log| log.volume).sum();
     Ok(SessionDetails {
-        session: summary(entry)?,
-        exercises: group_by_exercise(sets)?,
+        session: summary(entry, volume, set_pr)?,
+        exercises,
     })
 }
 
@@ -127,7 +153,11 @@ fn weight(nanograms: u64) -> Result<Weight, ApiError> {
     Weight::from_nanograms(nanograms).map_err(ApiError::internal)
 }
 
-fn summary(entry: repo::HistoryEntry) -> Result<SessionSummary, ApiError> {
+fn summary(
+    entry: repo::HistoryEntry,
+    volume: Volume,
+    set_pr: bool,
+) -> Result<SessionSummary, ApiError> {
     Ok(SessionSummary {
         id: entry.id.into(),
         program_id: entry.program_id.into(),
@@ -135,11 +165,121 @@ fn summary(entry: repo::HistoryEntry) -> Result<SessionSummary, ApiError> {
         program_version_id: entry.program_version_id.into(),
         program_version: entry.program_version,
         day_id: DayId::new(entry.day_id).map_err(ApiError::internal)?,
+        day_name: entry.day_name,
         status: status(entry.status),
         started_at: timestamp(entry.started_at)?,
         finished_at: entry.finished_at.map(timestamp).transpose()?,
         working_sets: entry.working_sets,
+        volume,
+        set_pr,
     })
+}
+
+/// Stored sets grouped by session, each group in the stored order.
+fn by_session(
+    sets: Vec<sets::LoggedSet>,
+) -> Result<HashMap<ids::SessionId, Vec<LoggedSet<Timestamp>>>, ApiError> {
+    let mut groups: HashMap<ids::SessionId, Vec<LoggedSet<Timestamp>>> = HashMap::new();
+    for set in sets {
+        let session = set.session_id;
+        groups.entry(session).or_default().push(logged_set(set)?);
+    }
+    Ok(groups)
+}
+
+/// A session's volume, as the end-of-session summary counts it.
+fn volume(sets: &[LoggedSet<Timestamp>]) -> Volume {
+    session_volume(performed(sets))
+}
+
+/// Which of `entries` set a personal record, as their end-of-session summaries report them
+/// (`server::api::sessions`): completed sessions only, each against the sets of the completed
+/// sessions started before it (by start, then id). `sets` holds the entries' own sets.
+///
+/// One query whatever the number of entries: the record history of the exercises the entries
+/// logged, up to the latest-started completed entry, replayed in order.
+async fn sessions_with_prs(
+    pool: &PgPool,
+    owner: UserId,
+    entries: &[repo::HistoryEntry],
+    sets: &HashMap<ids::SessionId, Vec<LoggedSet<Timestamp>>>,
+) -> Result<HashSet<ids::SessionId>, ApiError> {
+    let completed: Vec<&repo::HistoryEntry> = entries
+        .iter()
+        .filter(|entry| entry.status == StoredStatus::Completed)
+        .collect();
+    let Some(latest) = completed
+        .iter()
+        .max_by_key(|entry| (entry.started_at, entry.id))
+    else {
+        return Ok(HashSet::new());
+    };
+    let mut exercises: Vec<String> = completed
+        .iter()
+        .filter_map(|entry| sets.get(&entry.id))
+        .flatten()
+        .map(|set| set.exercise.as_str().to_owned())
+        .collect();
+    exercises.sort_unstable();
+    exercises.dedup();
+    if exercises.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let before = Cursor {
+        started_at: latest.started_at,
+        id: latest.id,
+    };
+    // Every completed session before the latest entry, the other completed entries included.
+    let earlier = sets::completed_for_exercises_before(pool, owner, &exercises, before).await?;
+    let mut sweep: Vec<(ids::SessionId, Vec<LoggedSet<Timestamp>>)> = Vec::new();
+    for set in earlier {
+        let session = set.session_id;
+        let set = logged_set(set)?;
+        match sweep.last_mut() {
+            Some((last, group)) if *last == session => group.push(set),
+            _ => sweep.push((session, vec![set])),
+        }
+    }
+    sweep.push((latest.id, sets.get(&latest.id).cloned().unwrap_or_default()));
+    let candidates = completed.iter().map(|entry| entry.id).collect();
+    Ok(pr_sessions(sweep, &candidates))
+}
+
+/// Replays `sweep` (sessions in start order, each with its sets) and returns the `candidates`
+/// whose sets beat the records of the sessions before them, as `detect_prs` decides.
+fn pr_sessions<S: Copy + Eq + std::hash::Hash>(
+    sweep: Vec<(S, Vec<LoggedSet<Timestamp>>)>,
+    candidates: &HashSet<S>,
+) -> HashSet<S> {
+    let mut records: HashMap<ExerciseId, ExerciseRecords> = HashMap::new();
+    let mut found = HashSet::new();
+    for (session, sets) in sweep {
+        if candidates.contains(&session) {
+            let mut exercises: Vec<&ExerciseId> = sets.iter().map(|set| &set.exercise).collect();
+            exercises.dedup();
+            let beat = exercises.into_iter().any(|exercise| {
+                let of_exercise = sets
+                    .iter()
+                    .filter(|set| &set.exercise == exercise)
+                    .filter_map(Option::<PerformedSet>::from);
+                records
+                    .get(exercise)
+                    .is_some_and(|records| !records.prs(exercise, of_exercise).is_empty())
+            });
+            if beat {
+                found.insert(session);
+            }
+        }
+        for set in &sets {
+            if let Some(performed) = Option::<PerformedSet>::from(set) {
+                records
+                    .entry(set.exercise.clone())
+                    .or_insert_with(|| ExerciseRecords::new(FORMULA))
+                    .record(performed);
+            }
+        }
+    }
+    found
 }
 
 fn logged_set(set: sets::LoggedSet) -> Result<LoggedSet<Timestamp>, ApiError> {
@@ -160,15 +300,10 @@ fn logged_set(set: sets::LoggedSet) -> Result<LoggedSet<Timestamp>, ApiError> {
     })
 }
 
-/// The weighted sets, as statistics inputs (body-weight sets have no weight to chart).
+/// The sets the statistics count, as the domain decides (weighted and not timed): the same
+/// inputs as the end-of-session summary.
 fn performed(sets: &[LoggedSet<Timestamp>]) -> impl Iterator<Item = PerformedSet> + '_ {
-    sets.iter().filter_map(|set| {
-        set.weight.map(|weight| PerformedSet {
-            weight,
-            reps: set.reps,
-            warmup: set.warm_up,
-        })
-    })
+    sets.iter().filter_map(Option::<PerformedSet>::from)
 }
 
 /// Groups a session's sets by exercise, in the order each exercise was first logged, with each
@@ -196,9 +331,7 @@ pub fn group_by_exercise(sets: Vec<sets::LoggedSet>) -> Result<Vec<ExerciseLog>,
 
 /// The chart points of one exercise, from its sets grouped by session (as
 /// [`repo::exercise_sets`] returns them).
-pub fn series_points(
-    sets: Vec<repo::ExerciseSet>,
-) -> Result<Vec<SeriesPoint<SeriesKey>>, ApiError> {
+pub fn series_points(sets: Vec<repo::ExerciseSet>) -> Result<Vec<ExercisePoint>, ApiError> {
     let mut sessions: Vec<(SeriesKey, Vec<PerformedSet>)> = Vec::new();
     for set in sets {
         let key = SeriesKey {
@@ -215,7 +348,19 @@ pub fn series_points(
             _ => sessions.push((key, vec![performed])),
         }
     }
-    Ok(exercise_series(sessions, FORMULA))
+    let volumes: HashMap<SeriesKey, Volume> = sessions
+        .iter()
+        .map(|(key, sets)| (*key, session_volume(sets.iter().copied())))
+        .collect();
+    Ok(exercise_series(sessions, FORMULA)
+        .into_iter()
+        .map(|point| ExercisePoint {
+            volume: volumes.get(&point.key).copied().unwrap_or(Volume::ZERO),
+            key: point.key,
+            top_set: point.top_set,
+            best_e1rm: point.best_e1rm,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -272,7 +417,7 @@ mod tests {
     }
 
     fn epley(weight: Weight, reps: u16) -> Option<Weight> {
-        iron_oxide_domain::E1rmFormula::Epley.estimate(weight, Reps::new(reps))
+        FORMULA.estimate(weight, Reps::new(reps))
     }
 
     #[test]
@@ -400,7 +545,7 @@ mod tests {
         ])
         .unwrap();
         let expected = vec![
-            SeriesPoint {
+            ExercisePoint {
                 key: SeriesKey {
                     started_at: Timestamp::from_epoch_millis(0),
                     session_id: SessionId::from_uuid(Uuid::from_u128(1)),
@@ -410,8 +555,10 @@ mod tests {
                     reps: Reps::new(3),
                 },
                 best_e1rm: epley(kg(100.0), 5).max(epley(kg(105.0), 3)),
+                // 100 × 5 + 105 × 3.
+                volume: Volume::of(kg(815.0), Reps::new(1)),
             },
-            SeriesPoint {
+            ExercisePoint {
                 key: SeriesKey {
                     started_at: Timestamp::from_epoch_millis(1_000),
                     session_id: SessionId::from_uuid(Uuid::from_u128(3)),
@@ -421,10 +568,43 @@ mod tests {
                     reps: Reps::new(1),
                 },
                 best_e1rm: epley(kg(90.0), 12).max(Some(kg(107.5))),
+                // 107.5 × 1 + 90 × 12; the warm-up of session 2 adds nothing anywhere.
+                volume: Volume::of(kg(1187.5), Reps::new(1)),
             },
         ];
         assert_eq!(points, expected);
         assert!(series_points(Vec::new()).unwrap().is_empty());
+    }
+
+    fn performed_set(n: u128, exercise: &str, weight: f64, reps: u16) -> LoggedSet<Timestamp> {
+        logged_set(set(n, exercise, Some(weight), reps, false)).unwrap()
+    }
+
+    #[test]
+    fn pr_sessions_replays_the_history_in_order() {
+        let sweep = vec![
+            // Not a candidate (an older page): its sets still count as history.
+            (1, vec![performed_set(1, "squat", 100.0, 5)]),
+            // Same lift: no record.
+            (2, vec![performed_set(2, "squat", 100.0, 5)]),
+            // Heavier: a record.
+            (3, vec![performed_set(3, "squat", 105.0, 5)]),
+            // A first bench session is no record (nothing to beat), squat 100 x 6 is (reps).
+            (
+                4,
+                vec![
+                    performed_set(4, "bench", 80.0, 5),
+                    performed_set(5, "squat", 100.0, 6),
+                ],
+            ),
+            // A first ever exercise alone: no record.
+            (5, vec![performed_set(6, "row", 60.0, 5)]),
+        ];
+        let candidates: HashSet<u32> = [2, 3, 4, 5].into_iter().collect();
+        let mut found: Vec<u32> = pr_sessions(sweep, &candidates).into_iter().collect();
+        found.sort_unstable();
+        assert_eq!(found, [3, 4]);
+        assert!(pr_sessions(Vec::<(u32, _)>::new(), &candidates).is_empty());
     }
 
     // --- Endpoints, against Postgres.
@@ -534,10 +714,16 @@ mod tests {
                 program_version_id: version.into(),
                 program_version: 1,
                 day_id: DayId::new("a").unwrap(),
+                // The test program has no days.
+                day_name: None,
                 status: iron_oxide_domain::SessionStatus::Completed,
                 started_at: timestamp(db_testing::at(4 * 3_600)).unwrap(),
                 finished_at: Some(timestamp(db_testing::at(4 * 3_600 + 600)).unwrap()),
                 working_sets: 1,
+                // 100 kg × 5; the warm-up adds nothing.
+                volume: Volume::of(kg(100.0), Reps::new(5)),
+                // The same lift as the four sessions before it: no record.
+                set_pr: false,
             }
         );
         assert!(
@@ -813,5 +999,303 @@ mod tests {
         for (path, body) in bodies {
             testing::assert_unauthorized_when_signed_out(&api, path, body).await;
         }
+    }
+
+    /// Ends `session` as `outcome`, `after` seconds after the fixed test time.
+    async fn end(
+        db: &PgPool,
+        owner: UserId,
+        session: ids::SessionId,
+        outcome: SessionOutcome,
+        after: i64,
+    ) {
+        db_sessions::finish(db, owner, session, outcome, db_testing::at(after))
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn history_items_carry_their_volume_and_whether_they_set_a_pr(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        let (_, version) = db_testing::program(&api.db, a.id).await;
+        let squat = |weight: f64, reps: u16| ("back-squat", Some(weight), reps, false);
+        let mut sessions = Vec::new();
+        // 0: the first squat session sets no record (nothing to beat).
+        sessions.push(seed(&api.db, a.id, version, 0, &[squat(100.0, 5)], Some(600)).await);
+        // 1: heavier, a record.
+        sessions.push(seed(&api.db, a.id, version, 1_000, &[squat(105.0, 5)], Some(600)).await);
+        // 2: a lighter session with a warm-up, body-weight work and a weighted hold: no record,
+        // and only 100 x 5 counts in its volume.
+        let light = seed(
+            &api.db,
+            a.id,
+            version,
+            2_000,
+            &[
+                ("back-squat", Some(60.0), 5, true),
+                squat(100.0, 5),
+                ("pull-up", None, 8, false),
+            ],
+            None,
+        )
+        .await;
+        let hold = sets::LoggedSet {
+            exercise_id: "plank".to_owned(),
+            weight_ng: Some(kg(20.0).as_nanograms()),
+            reps: 1,
+            duration_s: Some(60),
+            completed_at: db_testing::at(2_100),
+            ..db_testing::new_set(light)
+        };
+        sets::upsert_idempotent(&api.db, a.id, &hold).await.unwrap();
+        end(&api.db, a.id, light, SessionOutcome::Completed, 2_600).await;
+        sessions.push(light);
+        // 3: abandoned: never a record, and not a record to beat later.
+        let abandoned = seed(&api.db, a.id, version, 3_000, &[squat(200.0, 1)], None).await;
+        end(&api.db, a.id, abandoned, SessionOutcome::Abandoned, 3_600).await;
+        sessions.push(abandoned);
+        // 4: one more rep at 100 kg, a record.
+        sessions.push(seed(&api.db, a.id, version, 4_000, &[squat(100.0, 6)], Some(600)).await);
+        // 5: 150 kg beats 105 kg; it would not beat the abandoned 200 kg.
+        sessions.push(seed(&api.db, a.id, version, 5_000, &[squat(150.0, 1)], Some(600)).await);
+        let expected_prs = [false, true, false, false, true, true];
+
+        // The same flags whatever the page size, across page boundaries too.
+        for limit in [1, 2, 4, 20] {
+            let mut flags = Vec::new();
+            let mut cursor: Option<HistoryCursor> = None;
+            loop {
+                let page: HistoryPage = a
+                    .call(PAGE, json!({ "cursor": cursor, "limit": limit }))
+                    .await
+                    .unwrap();
+                flags.extend(page.sessions.iter().map(|s| (s.id.as_uuid(), s.set_pr)));
+                match page.next {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+            let expected: Vec<(Uuid, bool)> = sessions
+                .iter()
+                .zip(expected_prs)
+                .rev()
+                .map(|(id, pr)| (id.as_uuid(), pr))
+                .collect();
+            assert_eq!(flags, expected, "limit {limit}");
+        }
+
+        let page: HistoryPage = a.call(PAGE, json!({})).await.unwrap();
+        let volume_of = |id: ids::SessionId| {
+            page.sessions
+                .iter()
+                .find(|s| s.id.as_uuid() == id.as_uuid())
+                .unwrap()
+                .volume
+        };
+        assert_eq!(volume_of(light), Volume::of(kg(100.0), Reps::new(5)));
+        assert_eq!(volume_of(abandoned), Volume::of(kg(200.0), Reps::new(1)));
+        assert_eq!(volume_of(sessions[1]), Volume::of(kg(105.0), Reps::new(5)));
+
+        // The details say the same as the list.
+        for listed in &page.sessions {
+            let details: SessionDetails = a
+                .call(DETAILS, json!({ "session_id": listed.id.as_uuid() }))
+                .await
+                .unwrap();
+            assert_eq!(&details.session, listed);
+            let sum: Volume = details.exercises.iter().map(|e| e.volume).sum();
+            assert_eq!(sum, listed.volume);
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn another_users_lifts_never_make_or_break_a_record(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let (mut a, mut b) = api.users_a_and_b().await;
+        let (_, a_version) = db_testing::program(&api.db, a.id).await;
+        let (_, b_version) = db_testing::program(&api.db, b.id).await;
+        // B lifts far more, earlier.
+        let b_session = seed(
+            &api.db,
+            b.id,
+            b_version,
+            0,
+            &[("back-squat", Some(250.0), 5, false)],
+            Some(600),
+        )
+        .await;
+        for (start, weight) in [(1_000, 100.0), (2_000, 101.0)] {
+            seed(
+                &api.db,
+                a.id,
+                a_version,
+                start,
+                &[("back-squat", Some(weight), 5, false)],
+                Some(600),
+            )
+            .await;
+        }
+        let a_page: HistoryPage = a.call(PAGE, json!({})).await.unwrap();
+        // A's second session is a record against A's first only.
+        let flags: Vec<bool> = a_page.sessions.iter().map(|s| s.set_pr).collect();
+        assert_eq!(flags, [true, false]);
+        let b_page: HistoryPage = b.call(PAGE, json!({})).await.unwrap();
+        assert_eq!(b_page.sessions.len(), 1);
+        assert!(!b_page.sessions[0].set_pr);
+        // A's sets query never returns B's sets, even given B's session id.
+        let leaked = sets::list_for_sessions(&api.db, a.id, &[b_session])
+            .await
+            .unwrap();
+        assert!(leaked.is_empty());
+        assert_eq!(
+            sets::list_for_sessions(&api.db, b.id, &[b_session])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn sessions_keep_the_day_name_of_their_own_program_version(db: PgPool) {
+        use crate::server::db::programs;
+
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        let document = |day: &str| json!({ "schema_version": 1, "name": "P", "days": [{ "id": "a", "name": day }] });
+        let (_, program, v1) = programs::create(
+            &api.db,
+            a.id,
+            db_testing::creation(),
+            "P",
+            &document("Heavy day"),
+            db_testing::unlimited,
+        )
+        .await
+        .unwrap();
+        let old = seed(&api.db, a.id, v1.id, 0, &[], Some(600)).await;
+        let (_, v2) = programs::add_version(&api.db, a.id, program.id, &document("Light day"))
+            .await
+            .unwrap();
+        let new = seed(&api.db, a.id, v2.id, 1_000, &[], Some(600)).await;
+
+        let page: HistoryPage = a.call(PAGE, json!({})).await.unwrap();
+        let names: Vec<Option<&str>> = page
+            .sessions
+            .iter()
+            .map(|s| s.day_name.as_deref())
+            .collect();
+        assert_eq!(names, [Some("Light day"), Some("Heavy day")]);
+        for (session, name) in [(old, "Heavy day"), (new, "Light day")] {
+            let details: SessionDetails = a
+                .call(DETAILS, json!({ "session_id": session.as_uuid() }))
+                .await
+                .unwrap();
+            assert_eq!(details.session.day_name.as_deref(), Some(name));
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn the_series_carries_each_sessions_volume(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        let (_, version) = db_testing::program(&api.db, a.id).await;
+        seed(
+            &api.db,
+            a.id,
+            version,
+            0,
+            &[
+                ("back-squat", Some(60.0), 5, true),
+                ("back-squat", Some(100.0), 5, false),
+                ("back-squat", Some(100.0), 4, false),
+                ("bench", Some(80.0), 5, false),
+            ],
+            Some(600),
+        )
+        .await;
+        let series: ExerciseSeries = a
+            .call(SERIES, json!({ "exercise_id": "back-squat" }))
+            .await
+            .unwrap();
+        assert_eq!(series.points.len(), 1);
+        // 100 x 5 + 100 x 4; the warm-up and the bench add nothing.
+        assert_eq!(series.points[0].volume, Volume::of(kg(100.0), Reps::new(9)));
+    }
+
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn sessions_started_and_finished_together_page_stably(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        let (_, version) = db_testing::program(&api.db, a.id).await;
+        // An earlier session to beat, then two sessions with the same start and the same finish
+        // (one in progress at a time: each ends before the next starts, at the same instants).
+        let base = seed(
+            &api.db,
+            a.id,
+            version,
+            0,
+            &[("back-squat", Some(100.0), 5, false)],
+            Some(600),
+        )
+        .await;
+        let mut twins = Vec::new();
+        for weight in [105.0, 110.0] {
+            twins.push(
+                seed(
+                    &api.db,
+                    a.id,
+                    version,
+                    1_000,
+                    &[("back-squat", Some(weight), 5, false)],
+                    Some(600),
+                )
+                .await,
+            );
+        }
+        // History order: by finish then id, both descending; the twins tie on the finish.
+        let mut by_id = twins.clone();
+        by_id.sort_by_key(|id| std::cmp::Reverse(id.as_uuid()));
+        let expected: Vec<Uuid> = by_id.iter().chain([&base]).map(|id| id.as_uuid()).collect();
+
+        let mut flags_by_size = Vec::new();
+        for limit in [1, 2, 3] {
+            let mut seen = Vec::new();
+            let mut cursor: Option<HistoryCursor> = None;
+            loop {
+                let page: HistoryPage = a
+                    .call(PAGE, json!({ "cursor": cursor, "limit": limit }))
+                    .await
+                    .unwrap();
+                seen.extend(page.sessions.iter().map(|s| (s.id.as_uuid(), s.set_pr)));
+                match page.next {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+            let ids: Vec<Uuid> = seen.iter().map(|(id, _)| *id).collect();
+            // No session skipped or repeated across pages, always in the same order.
+            assert_eq!(ids, expected, "limit {limit}");
+            flags_by_size.push(seen);
+        }
+        // The PR flags do not depend on where the page breaks fall.
+        assert!(
+            flags_by_size.windows(2).all(|pair| pair[0] == pair[1]),
+            "{flags_by_size:?}"
+        );
+        // Both twins lift more than every session before them, whichever way the tie breaks.
+        let flags: Vec<bool> = flags_by_size[0].iter().map(|(_, pr)| *pr).collect();
+        assert_eq!(
+            flags.last(),
+            Some(&false),
+            "the first session has nothing to beat"
+        );
+        assert!(flags[..2].iter().all(|pr| *pr), "{flags:?}");
     }
 }

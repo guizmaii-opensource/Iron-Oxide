@@ -31,6 +31,9 @@ pub struct HistoryEntry {
     /// The version number (1, 2, ...) the session was run from.
     pub program_version: u32,
     pub day_id: String,
+    /// The day's name in the session's own program version (as it was when the session ran),
+    /// `None` if that version has no such day.
+    pub day_name: Option<String>,
     pub status: SessionStatus,
     pub started_at: OffsetDateTime,
     /// Set exactly when the status is not in progress.
@@ -69,6 +72,7 @@ struct EntryRow {
     program_version_id: Uuid,
     program_version: i32,
     day_id: String,
+    day_name: Option<String>,
     status: String,
     started_at: OffsetDateTime,
     finished_at: Option<OffsetDateTime>,
@@ -86,6 +90,7 @@ impl TryFrom<EntryRow> for HistoryEntry {
             program_version_id: ProgramVersionId::from_uuid(row.program_version_id),
             program_version: narrow(row.program_version.into(), "program_versions.version")?,
             day_id: row.day_id,
+            day_name: row.day_name,
             status: SessionStatus::parse(&row.status)?,
             started_at: row.started_at,
             finished_at: row.finished_at,
@@ -117,7 +122,10 @@ pub async fn page(
     let mut entries = sqlx::query_as!(
         EntryRow,
         r#"SELECT s.id, v.program_id, p.name AS program_name, s.program_version_id,
-                  v.version AS program_version, s.day_id, s.status, s.started_at, s.finished_at,
+                  v.version AS program_version, s.day_id,
+                  (SELECT d ->> 'name' FROM jsonb_array_elements(v.document -> 'days') d
+                   WHERE d ->> 'id' = s.day_id LIMIT 1) AS day_name,
+                  s.status, s.started_at, s.finished_at,
                   (SELECT count(*) FROM workout_sets st
                    WHERE st.user_id = s.user_id AND st.session_id = s.id AND NOT st.warmup)
                       AS "working_sets!"
@@ -152,7 +160,10 @@ pub async fn entry(pool: &PgPool, user: UserId, id: SessionId) -> Result<History
     let row = sqlx::query_as!(
         EntryRow,
         r#"SELECT s.id, v.program_id, p.name AS program_name, s.program_version_id,
-                  v.version AS program_version, s.day_id, s.status, s.started_at, s.finished_at,
+                  v.version AS program_version, s.day_id,
+                  (SELECT d ->> 'name' FROM jsonb_array_elements(v.document -> 'days') d
+                   WHERE d ->> 'id' = s.day_id LIMIT 1) AS day_name,
+                  s.status, s.started_at, s.finished_at,
                   (SELECT count(*) FROM workout_sets st
                    WHERE st.user_id = s.user_id AND st.session_id = s.id AND NOT st.warmup)
                       AS "working_sets!"
@@ -184,7 +195,8 @@ pub struct ExerciseSet {
 /// The user's weighted sets of one exercise in ended sessions, grouped by session: sessions in
 /// start order (then by id), sets in the order they were completed.
 ///
-/// Sets without a weight (body-weight work) are left out: the charts plot weights. Sets of every
+/// Sets without a weight (body-weight work) and timed sets (holds) are left out: the charts plot
+/// weights lifted, as the domain statistics count them. Sets of every
 /// ended session count (a set logged before a session was abandoned was still lifted).
 pub async fn exercise_sets(
     pool: &PgPool,
@@ -196,7 +208,7 @@ pub async fn exercise_sets(
            FROM workout_sets st
            JOIN workout_sessions s ON s.id = st.session_id AND s.user_id = st.user_id
            WHERE st.user_id = $1 AND st.exercise_id = $2 AND st.weight_ng IS NOT NULL
-             AND s.status <> 'in_progress'
+             AND st.duration_s IS NULL AND s.status <> 'in_progress'
            ORDER BY s.started_at, s.id, st.completed_at, st.id"#,
         user.as_uuid(),
         exercise_id,
@@ -345,6 +357,7 @@ mod tests {
                 program_version_id: version,
                 program_version: 1,
                 day_id: "a".to_owned(),
+                day_name: None,
                 status: SessionStatus::Abandoned,
                 started_at: at(0),
                 finished_at: Some(at(200)),
@@ -432,6 +445,45 @@ mod tests {
             .unwrap();
         assert_eq!((rest.entries.len(), rest.more), (1, false));
         assert_eq!(rest.entries[0].started_at, at(0));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn exercise_sets_leave_out_weighted_holds(pool: PgPool) {
+        let user = testing::user(&pool).await;
+        let (_, version) = testing::program(&pool, user).await;
+        let session = start(&pool, user, version, at(0)).await;
+        // A weighted plank: a weight and a duration. Not a lift for the charts or the volume.
+        let hold = LoggedSet {
+            exercise_id: "plank".to_owned(),
+            reps: 1,
+            weight_ng: Some(20_000_000_000_000),
+            duration_s: Some(60),
+            completed_at: at(10),
+            ..new_set(session)
+        };
+        let lifted = LoggedSet {
+            exercise_id: "plank".to_owned(),
+            reps: 8,
+            weight_ng: Some(10_000_000_000_000),
+            completed_at: at(20),
+            ..new_set(session)
+        };
+        for set in [hold, lifted] {
+            log(&pool, user, set).await;
+        }
+        finish(&pool, user, session, at(100)).await;
+        let found = exercise_sets(&pool, user, "plank").await.unwrap();
+        assert_eq!(
+            found,
+            vec![ExerciseSet {
+                session_id: session,
+                session_started_at: at(0),
+                reps: 8,
+                weight_ng: 10_000_000_000_000,
+                warmup: false,
+            }]
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
