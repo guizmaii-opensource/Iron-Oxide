@@ -12,7 +12,7 @@
 
 use dioxus::prelude::*;
 
-use super::components::Card;
+use super::components::{Card, Segment, Segmented};
 use crate::pwa::{THEME_COLOR, THEME_COLOR_LIGHT};
 
 /// The `localStorage` key of the choice, one per device.
@@ -49,6 +49,15 @@ impl ThemeChoice {
             Self::System => None,
             Self::Light => Some("light"),
             Self::Dark => Some("dark"),
+        }
+    }
+
+    /// The value of its segment in the control.
+    #[must_use]
+    pub const fn value(self) -> &'static str {
+        match self.stored() {
+            Some(value) => value,
+            None => "system",
         }
     }
 
@@ -140,7 +149,7 @@ pub fn AppearanceCard() -> Element {
     rsx! {
         Card { title: "Appearance",
             div { class: "io-setting",
-                span { id: "theme-label", class: "io-setting-name", "Theme" }
+                span { class: "io-setting-name", "Theme" }
                 span { class: "io-muted",
                     if current == ThemeChoice::System {
                         "Follows your device"
@@ -149,26 +158,20 @@ pub fn AppearanceCard() -> Element {
                     }
                 }
             }
-            div {
-                class: "io-segmented",
-                role: "radiogroup",
-                aria_labelledby: "theme-label",
-                for option in ThemeChoice::ALL {
-                    label { key: "{option.label()}", class: "io-segment",
-                        input {
-                            r#type: "radio",
-                            name: "theme",
-                            value: option.stored().unwrap_or("system"),
-                            checked: option == current,
-                            onchange: move |_| {
-                                choice.set(option);
-                                not_kept.set(!device::write(option));
-                                apply(option);
-                            },
-                        }
-                        span { "{option.label()}" }
-                    }
-                }
+            Segmented {
+                name: "theme",
+                label: "Theme",
+                segments: ThemeChoice::ALL
+                    .iter()
+                    .map(|option| Segment::new(option.value(), option.label()))
+                    .collect::<Vec<_>>(),
+                selected: current.value(),
+                on_change: move |value: String| {
+                    let option = ThemeChoice::parse(Some(&value));
+                    choice.set(option);
+                    not_kept.set(!device::write(option));
+                    apply(option);
+                },
             }
             if *not_kept.read() {
                 p { class: "io-muted io-hint", role: "status",
@@ -232,6 +235,7 @@ mod tests {
         assert_eq!(ThemeChoice::parse(Some(" dark\n")), ThemeChoice::Dark);
         for choice in ThemeChoice::ALL {
             assert_eq!(ThemeChoice::parse(choice.stored()), choice);
+            assert_eq!(ThemeChoice::parse(Some(choice.value())), choice);
         }
     }
 
