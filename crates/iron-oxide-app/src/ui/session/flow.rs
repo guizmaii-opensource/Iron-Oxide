@@ -20,9 +20,7 @@ use iron_oxide_domain::program::{Exercise, Work};
 use iron_oxide_domain::progression::{NextTargets, SetGoal, SetTarget};
 use iron_oxide_domain::time::Timestamp;
 use iron_oxide_domain::timer::IntervalPlan;
-use iron_oxide_domain::{
-    ExerciseId, LoggedSet, PlateInventory, Reps, Seconds, SetId, Unit, Weight,
-};
+use iron_oxide_domain::{ExerciseId, LoggedSet, Reps, Seconds, SetId, Unit, Weight};
 
 use crate::api::sessions::{PlannedExercise, SessionPlan};
 use crate::ui::weight::weight_text;
@@ -265,20 +263,6 @@ pub fn prefill(
         .weight
         .map(|target| overridden.unwrap_or(target));
     Prefill { reps, weight }
-}
-
-/// The weight stepper's step: two of the smallest plate in the user's inventory (one per side),
-/// or 2.5 kg / 5 lb without plates.
-#[must_use]
-pub fn weight_step(inventory: &PlateInventory, unit: Unit) -> Weight {
-    let smallest = inventory.stock().iter().map(|stock| stock.plate).min();
-    smallest
-        .and_then(|plate| plate.checked_mul(2).ok())
-        .filter(|step| !step.is_zero())
-        .unwrap_or_else(|| match unit {
-            Unit::Kg => Weight::from_kg(2.5).unwrap_or(Weight::ZERO),
-            Unit::Lb => Weight::from_lb(5.0).unwrap_or(Weight::ZERO),
-        })
 }
 
 /// The set to save for a step. The completion time is never before the session's start, so a
@@ -646,9 +630,7 @@ mod tests {
     use crate::api::sessions::SessionView;
     use iron_oxide_domain::program::{RepTarget, SupersetId};
     use iron_oxide_domain::progression::{ExerciseTargets, TargetSource};
-    use iron_oxide_domain::{
-        DayId, PlateStock, ProgramId, ProgramVersionId, SessionId, SessionStatus,
-    };
+    use iron_oxide_domain::{DayId, ProgramId, ProgramVersionId, SessionId, SessionStatus};
     use uuid::Uuid;
 
     fn kg(value: f64) -> Weight {
@@ -960,29 +942,6 @@ mod tests {
                 reps: Reps::new(1),
                 weight: None
             }
-        );
-    }
-
-    #[test]
-    fn the_weight_step_is_a_pair_of_the_smallest_plates() {
-        assert_eq!(
-            weight_step(&PlateInventory::default_for(Unit::Kg), Unit::Kg),
-            kg(2.5)
-        );
-        assert_eq!(
-            weight_step(&PlateInventory::default_for(Unit::Lb), Unit::Lb),
-            Weight::from_lb(5.0).unwrap()
-        );
-        let fives = PlateInventory::new([PlateStock {
-            plate: kg(5.0),
-            pairs: 2,
-        }])
-        .unwrap();
-        assert_eq!(weight_step(&fives, Unit::Kg), kg(10.0));
-        assert_eq!(weight_step(&PlateInventory::empty(), Unit::Kg), kg(2.5));
-        assert_eq!(
-            weight_step(&PlateInventory::empty(), Unit::Lb),
-            Weight::from_lb(5.0).unwrap()
         );
     }
 

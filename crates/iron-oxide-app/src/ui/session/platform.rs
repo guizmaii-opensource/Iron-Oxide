@@ -105,15 +105,16 @@ impl KeepAudioReady {
     }
 }
 
-/// Plays `cue`'s beeps when `sound` is on, and vibrates where the device can. Best effort: a
+/// Plays `cue`'s beeps when `sound` is on, and vibrates when `vibration` is on and the device
+/// can. Best effort: a
 /// browser without Web Audio or vibration just skips that part. Beeps are only scheduled on a
 /// running audio context: one that is suspended would play them late, at the next tap, so they
 /// are dropped instead.
-pub fn announce(cue: Cue, sound: bool) {
+pub fn announce(cue: Cue, sound: bool, vibration: bool) {
     #[cfg(feature = "web")]
-    web::announce(cue, sound);
+    web::announce(cue, sound, vibration);
     #[cfg(not(feature = "web"))]
-    let _ = (cue, sound);
+    let _ = (cue, sound, vibration);
 }
 
 /// Keeps the screen on while it is alive (Screen Wake Lock), asking again each time the page
@@ -204,7 +205,7 @@ mod web {
         });
     }
 
-    pub fn announce(cue: Cue, sound: bool) {
+    pub fn announce(cue: Cue, sound: bool, vibration: bool) {
         if sound {
             // After a reload no tap has unlocked the audio yet: try anyway, which works where the
             // browser allows it (not on iOS, which stays silent until the next tap).
@@ -223,7 +224,8 @@ mod web {
                 }
             });
         }
-        if let Some(navigator) = web_sys::window().map(|window| window.navigator())
+        if vibration
+            && let Some(navigator) = web_sys::window().map(|window| window.navigator())
             && has(&navigator, "vibrate")
         {
             let _ = match cue {

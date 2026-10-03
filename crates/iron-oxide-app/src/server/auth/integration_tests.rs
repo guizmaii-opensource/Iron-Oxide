@@ -22,6 +22,8 @@ const ADD_FINISH: &str = "/api/auth/passkey/add/finish";
 const REMOVE: &str = "/api/auth/passkey/remove";
 const ME: &str = "/api/auth/me";
 const SIGN_OUT: &str = "/api/auth/sign-out";
+const SIGN_OUT_EVERYWHERE: &str = "/api/auth/sign-out-everywhere";
+const RENAME: &str = "/api/auth/rename";
 const GOOGLE_BEGIN: &str = "/api/auth/google/begin";
 const GOOGLE_UNLINK: &str = "/api/auth/google/unlink";
 
@@ -534,6 +536,112 @@ async fn sign_out_deletes_the_session_server_side(db: PgPool) {
     thief.cookie = stolen;
     assert_eq!(
         me(&mut thief).await.unwrap_err().status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn sign_out_everywhere_ends_every_session_of_the_user_and_only_theirs(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut phone = app.browser();
+    let mut passkey = Passkey::new();
+    let (a, credential_id) = sign_up(&mut phone, &mut passkey, "A").await;
+    // The same account on a second device.
+    let mut laptop = app.browser();
+    let assertion = sign_in_assertion(&mut laptop, &mut passkey, &credential_id).await;
+    let on_laptop: Me = laptop
+        .call(SIGN_IN_FINISH, json!({ "credential": assertion }))
+        .await
+        .unwrap();
+    assert_eq!(on_laptop.user_id, a.user_id);
+    let laptop_cookie = laptop.cookie.clone();
+    // Another user, signed in elsewhere.
+    let mut other = app.browser();
+    let (b, _) = sign_up(&mut other, &mut Passkey::new(), "B").await;
+    assert_eq!(session_rows(&db).await, 3);
+
+    let () = phone.call(SIGN_OUT_EVERYWHERE, json!({})).await.unwrap();
+    assert!(phone.cookie.is_none(), "this device's cookie is cleared");
+    for browser in [&mut phone, &mut laptop] {
+        assert_eq!(
+            me(browser).await.unwrap_err().status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // A copy of the laptop's cookie is worthless too.
+    let mut copy = app.browser();
+    copy.cookie = laptop_cookie;
+    assert_eq!(
+        me(&mut copy).await.unwrap_err().status,
+        StatusCode::UNAUTHORIZED
+    );
+    // The other user is still signed in.
+    assert_eq!(me(&mut other).await.unwrap().user_id, b.user_id);
+    assert_eq!(session_rows(&db).await, 1);
+    // Signed out, the call is refused.
+    assert_eq!(
+        phone
+            .call::<()>(SIGN_OUT_EVERYWHERE, json!({}))
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn rename_trims_and_checks_the_name_and_changes_only_the_callers_account(db: PgPool) {
+    let app = TestApp::new(db.clone()).await;
+    let mut a = app.browser();
+    sign_up(&mut a, &mut Passkey::new(), "A").await;
+    let mut b = app.browser();
+    let (b_before, _) = sign_up(&mut b, &mut Passkey::new(), "B").await;
+
+    let renamed: Me = a
+        .call(RENAME, json!({ "display_name": "  Jules  " }))
+        .await
+        .unwrap();
+    assert_eq!(renamed.display_name.as_deref(), Some("Jules"));
+    assert_eq!(
+        me(&mut a).await.unwrap().display_name.as_deref(),
+        Some("Jules")
+    );
+    // B is untouched.
+    assert_eq!(me(&mut b).await.unwrap(), b_before);
+
+    for (name, message) in [
+        ("   ", "Your name must not be blank."),
+        ("a\u{7}b", "Your name must not contain control characters."),
+    ] {
+        let error = a
+            .call::<Me>(RENAME, json!({ "display_name": name }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (error.status, error.message.as_str()),
+            (StatusCode::BAD_REQUEST, message)
+        );
+    }
+    let too_long = "é".repeat(crate::auth::types::MAX_NAME_CHARS + 1);
+    let error = a
+        .call::<Me>(RENAME, json!({ "display_name": too_long }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        me(&mut a).await.unwrap().display_name.as_deref(),
+        Some("Jules")
+    );
+
+    let mut signed_out = app.browser();
+    assert_eq!(
+        signed_out
+            .call::<Me>(RENAME, json!({ "display_name": "X" }))
+            .await
+            .unwrap_err()
+            .status,
         StatusCode::UNAUTHORIZED
     );
 }

@@ -384,11 +384,20 @@ completed session (`sets::completed_for_exercises_before`), replayed in order.
 - Errors: `422` for a page size out of range, a bad cursor or an exercise id that is not a slug;
   `404` for a session that is not the user's.
 
+### Account (`src/auth/api.rs`, #103)
+
+Sign-in keeps its own module and `AuthError` (see [Layout](#layout)); these two complete it.
+
+| Path | Arguments | Result |
+|---|---|---|
+| `/api/auth/rename` | `display_name` | The renamed `Me`. Trimmed; blank, longer than 64 characters or with a control character is `400` with the reason. |
+| `/api/auth/sign-out-everywhere` | none | Nothing. Deletes every session of the user, this one included, and clears this device's cookie: every device is signed out. |
+
 ### Settings (`src/api/settings.rs`, #20)
 
 | Path | Arguments | Result |
 |---|---|---|
-| `/api/settings/get` | none | `Settings`. A user who never saved any gets `Settings::defaults()`: kg, a 20 kg bar, the domain's default kg plate inventory (`PlateInventory::default_for(Kg)`), 120 s of rest, sound on. |
+| `/api/settings/get` | none | `Settings`. A user who never saved any gets `Settings::defaults()`: kg, a 20 kg bar, the domain's default kg plate inventory (`PlateInventory::default_for(Kg)`), 120 s of rest, sound and vibration on, weight steps of 2.5 kg and 5 lb (`kg_weight_step`, `lb_weight_step`, one per unit; `Settings::weight_step(unit)` picks the one in use). |
 | `/api/settings/update` | `settings: SettingsUpdate` | The saved `Settings` (plates sorted heaviest first). A full replace, so a retry is harmless. Concurrent updates (two devices) are last-writer-wins: the row always holds one whole update, never fields mixed from two. |
 | `/api/settings/training-maxes` | none | The user's `TrainingMax`es, by exercise id. |
 | `/api/settings/training-max/set` | `exercise_id`, `weight` (kg) | The saved `TrainingMax`. |
@@ -399,8 +408,15 @@ completed session (`sets::completed_for_exercises_before`), replayed in order.
   inventory as a plain list. The server validates them with the domain (`Weight::from_kg`,
   `PlateInventory::new`: no zero, duplicate or off-grid plate, at most 50 pairs and 16 sizes), and
   the default rest must be at most one hour. The bar must weigh more than zero and the inventory
-  must keep at least one plate size. Each refusal is an `InvalidField` naming `bar_weight`,
-  `plate_inventory` or `default_rest`. Weights out of range get a fixed message ("… must be between 0 and 2000 kg."), never the number echoed back. A typed `Weight` or `PlateInventory` argument would
+  must keep at least one plate size. Each weight step must be more than 0 and at most 25 kg
+  (`MAX_WEIGHT_STEP_KG`). Each refusal is an `InvalidField` naming `bar_weight`,
+  `plate_inventory`, `default_rest`, `kg_weight_step` or `lb_weight_step`.
+- **Weight step and vibration (#103)** used to be kept on the device. On the first load after
+  #103, the app carries a value still on the device over into a setting the server has at its
+  default, saves it, and removes the device's copy.
+  In `Settings` the three fields default when missing, so an export made before #103 still
+  imports (decision log #41). In `SettingsUpdate` they are optional: a client built before #103
+  leaves them out, and they keep their saved values. Weights out of range get a fixed message ("… must be between 0 and 2000 kg."), never the number echoed back. A typed `Weight` or `PlateInventory` argument would
   fail while the body is decoded, before the function runs, and only give the generic
   `422 Invalid request.` without saying which value is wrong.
 - **Defaults only when nothing was saved.** The defaults apply only while there is no

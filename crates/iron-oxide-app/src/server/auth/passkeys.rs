@@ -460,6 +460,25 @@ fn rfc3339(time: OffsetDateTime) -> String {
 }
 
 /// The signed-in user's account: name, passkeys and linked Google account.
+/// Renames the account (see `crate::auth::api::rename_account`).
+pub async fn rename(ctx: &AuthContext, user: UserId, display_name: &str) -> Result<Me, AuthError> {
+    let display_name = normalize_name(display_name)
+        .map_err(|reason| AuthError::Invalid(format!("Your name {reason}.")))?
+        .ok_or_else(|| AuthError::Invalid("Your name must not be blank.".to_owned()))?;
+    let updated = sqlx::query!(
+        "UPDATE users SET display_name = $2 WHERE id = $1",
+        user.as_uuid(),
+        display_name
+    )
+    .execute(ctx.db())
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Err(AuthError::Unauthenticated);
+    }
+    me(ctx, user).await
+}
+
 pub async fn me(ctx: &AuthContext, user: UserId) -> Result<Me, AuthError> {
     account(&mut *ctx.db().acquire().await?, user).await
 }

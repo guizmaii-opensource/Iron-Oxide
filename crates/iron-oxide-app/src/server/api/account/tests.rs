@@ -103,6 +103,7 @@ async fn seed(user: &mut TestUser) {
         "/api/settings/update",
         json!({ "settings": {
             "unit": "lb", "bar_weight": 15, "default_rest": 90, "sound_enabled": false,
+            "kg_weight_step": 1.0, "lb_weight_step": 1.13398093, "vibration_enabled": false,
             "plate_inventory": [{ "plate": 20, "pairs": 2 }, { "plate": 1.25, "pairs": 1 }]
         } }),
     )

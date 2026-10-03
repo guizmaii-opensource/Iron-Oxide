@@ -16,6 +16,13 @@ use {
     dioxus::server::axum::Extension,
 };
 
+/// The largest weight step [`update_settings`] accepts: 25 kg.
+#[cfg_attr(
+    not(any(feature = "server", test)),
+    allow(dead_code, reason = "checked by the server")
+)]
+pub const MAX_WEIGHT_STEP_KG: f64 = 25.0;
+
 /// The longest default rest [`update_settings`] accepts: one hour.
 pub const MAX_DEFAULT_REST: Seconds = Seconds::new(3_600);
 
@@ -29,11 +36,53 @@ pub struct Settings {
     /// The rest between sets when the program does not say.
     pub default_rest: Seconds,
     pub sound_enabled: bool,
+    /// How far the weight steppers move in kg mode. Defaults when missing, so that an export
+    /// made before #103 still imports.
+    #[serde(default = "default_kg_weight_step")]
+    pub kg_weight_step: Weight,
+    /// How far the weight steppers move in lb mode (default when missing, as above).
+    #[serde(default = "default_lb_weight_step")]
+    pub lb_weight_step: Weight,
+    /// Whether the rest timer vibrates the phone (where the browser can); on when missing.
+    #[serde(default = "default_vibration")]
+    pub vibration_enabled: bool,
+}
+
+fn default_kg_weight_step() -> Weight {
+    Settings::defaults().kg_weight_step
+}
+
+fn default_lb_weight_step() -> Weight {
+    Settings::defaults().lb_weight_step
+}
+
+const fn default_vibration() -> bool {
+    true
 }
 
 impl Settings {
+    /// How far the weight steppers move in `unit`.
+    #[must_use]
+    pub const fn weight_step(&self, unit: Unit) -> Weight {
+        match unit {
+            Unit::Kg => self.kg_weight_step,
+            Unit::Lb => self.lb_weight_step,
+        }
+    }
+
+    /// The same settings with `step` as the weight step of `unit`.
+    #[must_use]
+    pub fn with_weight_step(&self, unit: Unit, step: Weight) -> Self {
+        let mut settings = self.clone();
+        match unit {
+            Unit::Kg => settings.kg_weight_step = step,
+            Unit::Lb => settings.lb_weight_step = step,
+        }
+        settings
+    }
+
     /// The settings of a user who never saved any: kg, a 20 kg bar, the domain's default kg plate
-    /// inventory, 2 minutes of rest and sound on.
+    /// inventory, 2 minutes of rest, sound and vibration on, and steps of 2.5 kg or 5 lb.
     #[must_use]
     #[cfg_attr(
         not(any(feature = "server", test)),
@@ -49,6 +98,9 @@ impl Settings {
             plate_inventory: PlateInventory::default_for(Unit::Kg),
             default_rest: Seconds::new(120),
             sound_enabled: true,
+            kg_weight_step: Weight::from_kg(2.5).unwrap_or(Weight::ZERO),
+            lb_weight_step: Weight::from_lb(5.0).unwrap_or(Weight::ZERO),
+            vibration_enabled: true,
         }
     }
 }
@@ -69,6 +121,16 @@ pub struct SettingsUpdate {
     pub plate_inventory: Vec<PlateInput>,
     pub default_rest: Seconds,
     pub sound_enabled: bool,
+    /// The kg weight step, in kg. The #103 fields are optional: a client built before #103 does
+    /// not send them, and an absent field keeps the saved value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kg_weight_step: Option<f64>,
+    /// The lb weight step, in kg (a [`Weight`]'s JSON, like every weight); absent = unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lb_weight_step: Option<f64>,
+    /// Absent = unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vibration_enabled: Option<bool>,
 }
 
 /// A plate size (in kg) and how many pairs of it are available: a [`PlateStock`] before
@@ -102,6 +164,9 @@ impl From<Settings> for SettingsUpdate {
                 .collect(),
             default_rest: settings.default_rest,
             sound_enabled: settings.sound_enabled,
+            kg_weight_step: Some(settings.kg_weight_step.as_kg()),
+            lb_weight_step: Some(settings.lb_weight_step.as_kg()),
+            vibration_enabled: Some(settings.vibration_enabled),
         }
     }
 }
@@ -160,4 +225,35 @@ pub async fn set_training_max(
 #[post("/api/settings/training-max/delete", state: Extension<AppState>, user: AuthUser)]
 pub async fn delete_training_max(exercise_id: String) -> Result<(), ServerFnError> {
     Ok(logic::delete_training_max(&state.db, user.owner(), &exercise_id).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_saved_before_the_weight_steps_still_read() {
+        // An export made before #103 has no weight steps or vibration.
+        let mut json = serde_json::to_value(Settings::defaults()).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("kg_weight_step");
+        object.remove("lb_weight_step");
+        object.remove("vibration_enabled");
+        let read: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(read, Settings::defaults());
+    }
+
+    #[test]
+    fn the_weight_step_follows_the_unit() {
+        let settings =
+            Settings::defaults().with_weight_step(Unit::Lb, Weight::from_lb(2.5).unwrap());
+        assert_eq!(
+            settings.weight_step(Unit::Kg),
+            Weight::from_kg(2.5).unwrap()
+        );
+        assert_eq!(
+            settings.weight_step(Unit::Lb),
+            Weight::from_lb(2.5).unwrap()
+        );
+    }
 }

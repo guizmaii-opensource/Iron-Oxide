@@ -140,7 +140,8 @@ pub async fn settings(
     user: UserId,
 ) -> Result<Option<(UserSettings, OffsetDateTime)>, RepoError> {
     let row = sqlx::query!(
-        "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled, updated_at
+        "SELECT unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled,
+                kg_weight_step_ng, lb_weight_step_ng, vibration_enabled, updated_at
          FROM user_settings WHERE user_id = $1",
         user.as_uuid()
     )
@@ -153,6 +154,9 @@ pub async fn settings(
             plate_inventory: row.plate_inventory,
             default_rest_s: narrow(row.default_rest_s, "user_settings.default_rest_s")?,
             sound_enabled: row.sound_enabled,
+            kg_weight_step_ng: narrow(row.kg_weight_step_ng, "user_settings.kg_weight_step_ng")?,
+            lb_weight_step_ng: narrow(row.lb_weight_step_ng, "user_settings.lb_weight_step_ng")?,
+            vibration_enabled: row.vibration_enabled,
         };
         Ok((settings, row.updated_at))
     })
@@ -310,11 +314,24 @@ pub async fn insert_settings(
     let bar_weight_ng = i64::try_from(settings.bar_weight_ng).map_err(|_| RepoError::Invalid {
         constraint: Some("user_settings_bar_weight_ng_check".to_owned()),
     })?;
+    let step = |value: u64, constraint: &str| {
+        i64::try_from(value).map_err(|_| RepoError::Invalid {
+            constraint: Some(constraint.to_owned()),
+        })
+    };
+    let kg_weight_step_ng = step(
+        settings.kg_weight_step_ng,
+        "user_settings_kg_weight_step_ng_check",
+    )?;
+    let lb_weight_step_ng = step(
+        settings.lb_weight_step_ng,
+        "user_settings_lb_weight_step_ng_check",
+    )?;
     let inserted = sqlx::query!(
         "INSERT INTO user_settings
              (user_id, unit, bar_weight_ng, plate_inventory, default_rest_s, sound_enabled,
-              updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+              kg_weight_step_ng, lb_weight_step_ng, vibration_enabled, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (user_id) DO NOTHING",
         user.as_uuid(),
         settings.unit.as_str(),
@@ -322,6 +339,9 @@ pub async fn insert_settings(
         settings.plate_inventory,
         i64::from(settings.default_rest_s),
         settings.sound_enabled,
+        kg_weight_step_ng,
+        lb_weight_step_ng,
+        settings.vibration_enabled,
         updated_at,
     )
     .execute(tx)

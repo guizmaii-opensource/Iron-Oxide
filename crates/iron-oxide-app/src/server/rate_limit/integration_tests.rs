@@ -61,6 +61,7 @@ fn generous() -> Limits {
         google_callback: wide,
         session: wide,
         account: wide,
+        sign_out_everywhere: wide,
         account_data: wide,
         write: wide,
         capacity: 1_000,
@@ -584,6 +585,41 @@ async fn account_data_calls_share_their_own_per_user_limit(db: PgPool) {
         post_raw(&mut alice, ME, json!({})).await.status(),
         StatusCode::OK,
         "other groups are not affected, and the account still exists"
+    );
+}
+
+/// A stolen session renaming the account until the `account` bucket is empty cannot keep the owner
+/// from signing out on every device: that call has its own bucket (#103).
+#[sqlx::test]
+#[ignore = "needs Postgres"]
+async fn renames_cannot_use_up_sign_out_everywhere(db: PgPool) {
+    const RENAME: &str = "/api/auth/rename";
+    const SIGN_OUT_EVERYWHERE: &str = "/api/auth/sign-out-everywhere";
+    let mut limits = generous();
+    limits.account.per_user = Some(quota(3, HOUR));
+    limits.sign_out_everywhere.per_user = Some(quota(3, HOUR));
+    let app = TestApp::with_rate_limit(db, config(ClientIpSource::Peer, limits)).await;
+    let mut owner = app.browser();
+    sign_up(&mut owner, "owner").await;
+    for _ in 0..3 {
+        let status = post_raw(&mut owner, RENAME, json!({ "display_name": "x" }))
+            .await
+            .status();
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(
+        post_raw(&mut owner, RENAME, json!({ "display_name": "x" }))
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the account bucket is empty"
+    );
+    assert_eq!(
+        post_raw(&mut owner, SIGN_OUT_EVERYWHERE, json!({}))
+            .await
+            .status(),
+        StatusCode::OK,
+        "signing out everywhere still works"
     );
 }
 
