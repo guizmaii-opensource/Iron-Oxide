@@ -332,8 +332,20 @@ proptest! {
                 | ChangeKind::WeightIncreaseRepsReset { from, to, .. }) => {
                 prop_assert!(to > from);
                 prop_assert_eq!(to, working);
-                // On the step, unless the cap left no step above.
-                prop_assert!(on_step(to, step) || to.checked_add(step).is_err());
+                // On the step, unless the cap left no step above, or the increment was written in
+                // the lifter's unit by one of the rules involved: then it is added as written
+                // (#120), so `to` is exactly `from` plus it (or the cap).
+                let as_written = history
+                    .iter()
+                    .filter_map(|session| session.prescription)
+                    .map(|prescription| prescription.rule)
+                    .chain([exercise.progression])
+                    .filter_map(|rule| rule.increment())
+                    .filter(|increment| increment.unit() == settings.unit())
+                    .any(|increment| {
+                        from.checked_add(increment.weight()).unwrap_or(Weight::MAX) == to
+                    });
+                prop_assert!(on_step(to, step) || to.checked_add(step).is_err() || as_written);
             }
             Some(ChangeKind::Deload { from, to }) => {
                 prop_assert!(to <= from);
@@ -706,6 +718,44 @@ proptest! {
                     prop_assert_eq!(other.training_max, first.training_max);
                 }
             }
+        }
+    }
+}
+
+proptest! {
+    /// #120: the lifter's step, raised to what their plates can load: at least their step, a
+    /// multiple of a pair of their smallest plate, and less than one such pair above their step.
+    #[test]
+    fn the_lifters_step_is_loadable(
+        unit in unit(),
+        step in any_step(),
+        sizes in proptest::collection::vec((1_u64..=25_000_000_000_000, 0_u32..4), 0..6),
+    ) {
+        let stock: Vec<iron_oxide_domain::PlateStock> = sizes
+            .iter()
+            .map(|&(ng, pairs)| iron_oxide_domain::PlateStock {
+                plate: Weight::from_nanograms(ng).unwrap(),
+                pairs,
+            })
+            .collect();
+        let Ok(plates) = iron_oxide_domain::PlateInventory::new(stock) else {
+            return Ok(());
+        };
+        let chosen = ProgressionSettings::for_lifter(unit, step, &plates).step();
+        prop_assert!(chosen >= step);
+        let smallest_pair = plates
+            .stock()
+            .iter()
+            .filter(|stock| stock.pairs > 0)
+            .map(|stock| stock.plate)
+            .min()
+            .map(|plate| plate.checked_mul(2).unwrap());
+        match smallest_pair {
+            Some(pair) => {
+                prop_assert!(on_step(chosen, pair));
+                prop_assert!(chosen.as_nanograms() < step.as_nanograms() + pair.as_nanograms());
+            }
+            None => prop_assert_eq!(chosen, step),
         }
     }
 }

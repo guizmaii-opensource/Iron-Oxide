@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,\n                completed_at\n         FROM workout_sets WHERE user_id = $1 AND session_id = ANY($2)\n         ORDER BY completed_at, id",
+  "query": "SELECT id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,\n                completed_at, target_weight_ng, target_goal\n         FROM workout_sets WHERE user_id = $1 AND session_id = ANY($2)\n         ORDER BY completed_at, id",
   "describe": {
     "columns": [
       {
@@ -47,6 +47,16 @@
         "ordinal": 8,
         "name": "completed_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "target_weight_ng",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "target_goal",
+        "type_info": "Jsonb"
       }
     ],
     "parameters": {
@@ -64,8 +74,10 @@
       true,
       true,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "a64bcb2b1811dfa1c9cd74b2779e94b3055f27af48c624ec2298ec3f5acb08bb"
+  "hash": "6a892e5993bb97dcb8ed0507967b5dd5714c1e958ecd552014f58d2ce5656b42"
 }
