@@ -254,7 +254,7 @@ pub fn SettingsPage() -> Element {
         AppearanceCard {}
         Account {}
         PlanCard {}
-        DataCard {}
+        super::your_data::YourDataCard {}
     }
 }
 
@@ -803,20 +803,6 @@ fn PlanCard() -> Element {
         section { id: "plan", class: "io-card", aria_labelledby: "plan-title",
             h2 { id: "plan-title", "Plan" }
             {body}
-        }
-    }
-}
-
-/// Exporting, importing and deleting the user's data.
-// TODO(#22): replace this placeholder with export (download JSON), import and account deletion
-// once the GDPR server functions are merged.
-#[component]
-fn DataCard() -> Element {
-    rsx! {
-        Card { title: "Your data",
-            p { class: "io-muted",
-                "Exporting your data, importing it and deleting your account are coming soon."
-            }
         }
     }
 }
