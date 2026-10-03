@@ -15,6 +15,7 @@ How we work (tickets, pull requests, reviews, keeping branches up to date): see 
 | `.sqlx/` | Offline query metadata for the sqlx macros (see "Database"). |
 | `docker-compose.yml` | Local Postgres for development and tests. |
 | `programs/` | Built-in training programs (JSON), embedded in the domain crate. |
+| `landing/` | The static landing page of iron-oxyde.com (plain HTML and CSS), deployed to GitHub Pages. See "Landing page". |
 | `schemas/program.schema.json` | JSON Schema of a program document, generated from the domain types. Regenerate with `make schema`; a test fails when it is stale. |
 | `Makefile` | Entry point for every dev, test, build and deploy task (`make` lists them). |
 | `scripts/` | Helpers the Makefile and CI call: `setup.sh` (tool check and install), `smoke-test.sh` (release bundle smoke test), `check-postgres-tests.sh` (every Postgres test ran), `test-make-guards.sh` (the Makefile's own guards). |
@@ -79,6 +80,10 @@ Mobile
   tailscale-serve  Publish the app over HTTPS to your tailnet (tailscale serve)
   tailscale-reset  Stop publishing the app to your tailnet
 
+Landing page
+  landing-build    Assemble the landing page into LANDING_OUT (dist/landing)
+  landing          Preview the landing page on http://localhost:LANDING_PORT (8000)
+
 Misc
   clean            Delete the build output: cargo's target dir (the one in use) and dx's output
   prune            Delete build artefacts older than PRUNE_DAYS (14) or of removed toolchains (PRUNE_MAXSIZE=10GB caps)
@@ -98,6 +103,7 @@ Useful variables, set on the command line (`make test-db PG_PORT=5444`):
 | `DX_ARGS` | | Extra `dx serve` arguments for `dev` |
 | `LOCKED` | `--locked` | Empty to let cargo update `Cargo.lock` |
 | `DRY_RUN` | `0` | `1`: `setup` only checks |
+| `LANDING_OUT`, `LANDING_PORT` | `dist/landing`, `8000` | Output directory of `landing-build`, port of the `landing` preview |
 
 The Makefile puts `~/.cargo/bin` first on the `PATH` (see "Toolchain"), and on macOS, while the
 Xcode license is not accepted, points `DEVELOPER_DIR` at the Command Line Tools so git and the
@@ -455,6 +461,37 @@ make tailscale-serve                   # ...then publish it over HTTPS to the ta
 
 Step-by-step setups (simulators, real phones over Tailscale or mkcert, passkeys, debugging) are in
 docs/dev/mobile-testing.md, added by #63.
+
+## Landing page
+
+`landing/` is the static site served at <https://iron-oxyde.com>: one HTML page, one stylesheet, a
+small script for the "Copy the prompt" button, the app's self-hosted fonts (with their SIL Open Font
+License files) and optimised screenshots. No framework, no build step and no third-party requests.
+
+- `make landing` assembles the site into `dist/landing` and serves it on <http://localhost:8000>
+  (`LANDING_PORT` changes the port). `make landing-build` only assembles it.
+- **The prompt has one source: `programs/ai-prompt.md`** (#108), which the app shows too.
+  `make landing-build` puts it into the page (`scripts/landing-build.py`, between the
+  `prompt:begin`/`prompt:end` markers of `landing/index.html`) and fails if the file is missing.
+  Edit the prompt in `programs/ai-prompt.md`, never in the page.
+- The site also publishes `schemas/program.schema.json` at `/program.schema.json`.
+- The build (`scripts/landing-build.py`) also strips HTML and CSS comments from the shipped files
+  and fails if the page mentions GitHub, open source or a licence (the fonts' OFL files and the
+  JSON Schema are exempt). `LANDING_OUT` must be a plain directory strictly under `dist/`.
+- `.github/workflows/landing.yml` deploys it to GitHub Pages on every push to `main` that touches
+  `landing/`, the schema, the prompt, the build script, the `Makefile` or the workflow; pull
+  requests only build it. `landing/CNAME` holds the
+  domain.
+- Colours and fonts follow the app's Forge tokens (`crates/iron-oxide-app/assets/app.css`), copied
+  at the top of `landing/styles.css`: change both together.
+- Screenshots are in `landing/assets/screens/`, one per screen and theme (`*-dark`, `*-light`), taken
+  at 390 × 844 at 2× from `make dev` with seeded data: AVIF and WebP at 780 × 1688, plus a 390 × 844
+  PNG fallback. The page shows the light ones to visitors whose system uses the light theme.
+  `landing/assets/og.jpg` (1200 × 630) is the social preview image.
+- The logo is a typographic wordmark until the app icon (#69) is ready. Then put it at
+  `landing/assets/icon.svg` (or `icon.png`, square, at least 96 px), uncomment the `<img>` in the
+  header of `landing/index.html`, and replace `favicon.ico`, `favicon.svg` and
+  `apple-touch-icon.png` in `landing/` (today copies of the PWA icon).
 
 ## Disk usage
 

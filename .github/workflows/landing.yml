@@ -1,0 +1,64 @@
+name: Landing page
+
+# Deploys the static landing page (landing/, see `make landing-build`) to GitHub Pages, served at
+# https://iron-oxyde.com (landing/CNAME). The site also publishes the program JSON Schema at
+# /program.schema.json and shows the canonical AI prompt (programs/ai-prompt.md), so a change to
+# either (or to the build) redeploys it too.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "landing/**"
+      - "schemas/program.schema.json"
+      - "programs/ai-prompt.md"
+      - "scripts/landing-build.py"
+      - "Makefile"
+      - ".github/workflows/landing.yml"
+  # Pull requests touching the site only build it (no deploy), so a broken build shows up early.
+  pull_request:
+    paths:
+      - "landing/**"
+      - "schemas/program.schema.json"
+      - "programs/ai-prompt.md"
+      - "scripts/landing-build.py"
+      - "Makefile"
+      - ".github/workflows/landing.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push waits instead of cancelling one in progress. Pull request
+# builds get their own group per PR.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('landing-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Assemble the site
+        run: make landing-build LANDING_OUT=dist/landing
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: dist/landing
+
+  deploy:
+    name: Deploy
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

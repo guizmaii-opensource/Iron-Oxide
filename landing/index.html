@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Iron Oxide: your AI writes the program, Iron Oxide runs it</title>
+  <meta name="description" content="Ask ChatGPT, Claude, Gemini or any AI assistant for a strength program built around you, paste it into Iron Oxide, and train it set by set: big buttons, rest timer, plate calculator, automatic progression.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#121416" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f1ede6" media="(prefers-color-scheme: light)">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; font-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <link rel="canonical" href="https://iron-oxyde.com/">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Iron Oxide">
+  <meta property="og:url" content="https://iron-oxyde.com/">
+  <meta property="og:title" content="Your AI writes the program. Iron Oxide runs it.">
+  <meta property="og:description" content="A strength program built around you by your own AI assistant, trained set by set in a gym logger made for the phone.">
+  <meta property="og:image" content="https://iron-oxyde.com/assets/og.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Three Iron Oxide screens: logging a bench press set, the rest timer, and the back squat progress chart.">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <!-- Favicon: the app's current PWA icon until the icon from #69 replaces it (see "Landing page" in README.md). -->
+  <link rel="icon" href="favicon.ico" sizes="32x32">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+
+  <!-- Same self-hosted fonts as the app (OFL files in fonts/). -->
+  <link rel="preload" href="fonts/big-shoulders-display-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/ibm-plex-sans-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="top">
+    <div class="wrap top-inner">
+      <!--
+        The logo. A typographic wordmark until the icon from #69 is ready. To add the icon, put it
+        at landing/assets/icon.svg (or icon.png, square, at least 96 px) and uncomment the <img>
+        below; the wordmark stays next to it.
+      -->
+      <a class="wordmark" href="./">
+        <!-- <img class="wordmark-icon" src="assets/icon.svg" width="32" height="32" alt=""> -->
+        <span class="wordmark-name">Iron Oxide</span>
+        <span class="wordmark-formula" aria-hidden="true">Fe<sub>2</sub>O<sub>3</sub></span>
+      </a>
+      <a class="top-cta" href="https://app.iron-oxyde.com">Start training</a>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <h1 id="hero-title" class="hero-title">
+            <span class="hero-line">Your AI writes the program.</span>
+            <span class="hero-line hero-line-accent">Iron Oxide runs it.</span>
+          </h1>
+          <p class="hero-sub">Ask ChatGPT, Claude or Gemini for a strength program built around you — your goals, your schedule, your equipment. Paste it in, and Iron Oxide turns it into your training, set by set.</p>
+          <div class="hero-actions">
+            <a class="done-button" href="https://app.iron-oxyde.com">Start training</a>
+            <a class="text-link" href="#how">How it works</a>
+          </div>
+          <p class="tagline">Zero-cost gains. The only overhead is the barbell.</p>
+        </div>
+        <figure class="phone hero-phone">
+          <picture>
+            <source type="image/avif" media="(prefers-color-scheme: light)" srcset="assets/screens/session-light.avif">
+            <source type="image/webp" media="(prefers-color-scheme: light)" srcset="assets/screens/session-light.webp">
+            <source type="image/avif" srcset="assets/screens/session-dark.avif">
+            <source type="image/webp" srcset="assets/screens/session-dark.webp">
+            <img src="assets/screens/session-dark.png" width="390" height="844" fetchpriority="high" decoding="async"
+              alt="Iron Oxide during a workout: bench press, set 1 of 4, with big minus and plus steppers set to 5 reps and 92.5 kg, and a large Done button.">
+          </picture>
+        </figure>
+      </div>
+    </section>
+
+    <section id="how" class="section how" aria-labelledby="how-title">
+      <div class="wrap">
+        <h2 id="how-title" class="section-title">How it works</h2>
+        <ol class="steps">
+          <li class="step">
+            <div class="step-meter" aria-hidden="true"><span class="on"></span><span></span><span></span></div>
+            <h3 class="step-title"><span class="step-num">1</span> Ask your AI</h3>
+            <p>Copy the prompt below into ChatGPT, Claude, Gemini or any AI assistant. It asks about your goals, how many days you can train and for how long, your equipment, your experience and any injuries, then writes the program in Iron Oxide's format.</p>
+          </li>
+          <li class="step">
+            <div class="step-meter" aria-hidden="true"><span class="on"></span><span class="on"></span><span></span></div>
+            <h3 class="step-title"><span class="step-num">2</span> Paste it into Iron Oxide</h3>
+            <p>Bring the program into the app and make it your active program. Iron Oxide checks it and points at anything it can't use. No AI at hand? Start from the built-in full-body 3-day barbell program.</p>
+          </li>
+          <li class="step">
+            <div class="step-meter" aria-hidden="true"><span class="on"></span><span class="on"></span><span class="on"></span></div>
+            <h3 class="step-title"><span class="step-num">3</span> Train</h3>
+            <p>Open the app at the gym and follow the day: big buttons, a rest timer, a plate calculator and automatic progression.</p>
+          </li>
+        </ol>
+
+        <!-- The prompt: `make landing-build` inserts programs/ai-prompt.md (#108), the one prompt the
+             app shows too, between the prompt markers. Edit the prompt there, never here. -->
+        <figure class="prompt" aria-labelledby="prompt-title">
+          <div class="prompt-head">
+            <figcaption id="prompt-title" class="prompt-title">The prompt</figcaption>
+            <button class="copy-button" type="button" data-copy="prompt-text" hidden>Copy the prompt</button>
+          </div>
+          <pre class="prompt-body" id="prompt-text" tabindex="0" aria-label="The prompt to give your AI assistant"><!-- prompt:begin --><!-- prompt:end --></pre>
+          <p class="copy-status" role="status" aria-live="polite"></p>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section personal" aria-labelledby="personal-title">
+      <div class="wrap split">
+        <div class="split-copy">
+          <h2 id="personal-title" class="statement">Fully personalised.</h2>
+          <p class="lead">The program is yours: your days, your exercises, your notes, the movements you leave out. The app adapts each session to what you actually lifted.</p>
+          <p>Every exercise carries its own progression rule. Hit all your reps and the next session adds weight; work through a rep range and it adds reps first, then weight; fall short several sessions in a row and it takes some weight off so you can build back up.</p>
+        </div>
+        <figure class="phone">
+          <picture>
+            <source type="image/avif" media="(prefers-color-scheme: light)" srcset="assets/screens/progression-light.avif">
+            <source type="image/webp" media="(prefers-color-scheme: light)" srcset="assets/screens/progression-light.webp">
+            <source type="image/avif" srcset="assets/screens/progression-dark.avif">
+            <source type="image/webp" srcset="assets/screens/progression-dark.webp">
+            <img src="assets/screens/progression-dark.png" width="390" height="844" loading="lazy" decoding="async"
+              alt="A personal program in Iron Oxide: four sessions a week built for a home rack and a past shoulder strain, with each exercise's sets, load, rest and progression rule.">
+          </picture>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section features" aria-labelledby="features-title">
+      <div class="wrap">
+        <h2 id="features-title" class="section-title">Made for the gym floor</h2>
+        <p class="section-intro">One hand, sweaty fingers, a phone on the bench. Everything you touch mid-set is big, and nothing needs typing.</p>
+
+        <article class="feature">
+          <figure class="phone">
+            <picture>
+              <source type="image/avif" media="(prefers-color-scheme: light)" srcset="assets/screens/home-light.avif">
+              <source type="image/webp" media="(prefers-color-scheme: light)" srcset="assets/screens/home-light.webp">
+              <source type="image/avif" srcset="assets/screens/home-dark.avif">
+              <source type="image/webp" srcset="assets/screens/home-dark.webp">
+              <img src="assets/screens/home-dark.png" width="390" height="844" loading="lazy" decoding="async"
+                alt="The home screen: Upper 1 is next up, with bench press 4 × 5 at 92.5 kg, barbell row 3 × 9 at 62.5 kg and chin-ups, and a big Start button.">
+            </picture>
+          </figure>
+          <div class="feature-copy">
+            <h3 class="feature-title">Log a set with your thumb</h3>
+            <p>Open the app and today's session is waiting, its targets worked out from your last sessions. Tap Start: reps and weight sit on two big steppers already set to the target. Lifted something else? Nudge them, then tap Done. Warm-up sets from your program come first.</p>
+          </div>
+        </article>
+
+        <article class="feature">
+          <figure class="phone">
+            <picture>
+              <source type="image/avif" media="(prefers-color-scheme: light)" srcset="assets/screens/rest-light.avif">
+              <source type="image/webp" media="(prefers-color-scheme: light)" srcset="assets/screens/rest-light.webp">
+              <source type="image/avif" srcset="assets/screens/rest-dark.avif">
+              <source type="image/webp" srcset="assets/screens/rest-dark.webp">
+              <img src="assets/screens/rest-dark.png" width="390" height="844" loading="lazy" decoding="async"
+                alt="The rest timer counting down a 3:00 rest, with minus and plus 15 second buttons and the next set, 5 × 92.5 kg.">
+            </picture>
+          </figure>
+          <div class="feature-copy">
+            <h3 class="feature-title">Rest timer</h3>
+            <p>Rest starts the moment you tap Done, with the time your program sets for that exercise. Add or take 15 seconds, see what's next, and keep the screen awake while you wait.</p>
+          </div>
+        </article>
+
+        <article class="feature">
+          <figure class="phone">
+            <picture>
+              <source type="image/avif" media="(prefers-color-scheme: light)" srcset="assets/screens/plates-light.avif">
+              <source type="image/webp" media="(prefers-color-scheme: light)" srcset="assets/screens/plates-light.webp">
+              <source type="image/avif" srcset="assets/screens/plates-dark.avif">
+              <source type="image/webp" srcset="assets/screens/plates-dark.webp">
+              <img src="assets/screens/plates-dark.png" width="390" height="844" loading="lazy" decoding="async"
+                alt="The plate calculator for 92.5 kg: 25, 10 and 1.25 kg plates on each side of a 20 kg bar.">
+            </picture>
+          </figure>
+          <div class="feature-copy">
+            <h3 class="feature-title">Plate calculator</h3>
+            <p>One tap shows what goes on each side of the bar, worked out from your bar and the plates you actually own, in kg or lb. No mental arithmetic between sets.</p>
+          </div>
+        </article>
+
+        <article class="feature">
+          <figure class="phone">
+            <picture>
+              <source type="image/avif" media="(prefers-color-scheme: light)" srcset="assets/screens/chart-light.avif">
+              <source type="image/webp" media="(prefers-color-scheme: light)" srcset="assets/screens/chart-light.webp">
+              <source type="image/avif" srcset="assets/screens/chart-dark.avif">
+              <source type="image/webp" srcset="assets/screens/chart-dark.webp">
+              <img src="assets/screens/chart-dark.png" width="390" height="844" loading="lazy" decoding="async"
+                alt="Back squat progress: estimated one-rep max rising from 116.5 to 131.5 kg and top set from 100 to 112.5 kg over six weeks.">
+            </picture>
+          </figure>
+          <div class="feature-copy">
+            <h3 class="feature-title">History and progress</h3>
+            <p>Every session is kept, set by set. Each exercise gets its own chart of estimated one-rep max and top set, so you can see the weeks add up.</p>
+          </div>
+        </article>
+
+        <article class="feature">
+          <figure class="phone">
+            <picture>
+              <source type="image/avif" media="(prefers-color-scheme: light)" srcset="assets/screens/programs-light.avif">
+              <source type="image/webp" media="(prefers-color-scheme: light)" srcset="assets/screens/programs-light.webp">
+              <source type="image/avif" srcset="assets/screens/programs-dark.avif">
+              <source type="image/webp" srcset="assets/screens/programs-dark.webp">
+              <img src="assets/screens/programs-dark.png" width="390" height="844" loading="lazy" decoding="async"
+                alt="The programs screen: your own uploaded program marked active, the option to upload a program.json, and the built-in full-body 3-day barbell program.">
+            </picture>
+          </figure>
+          <div class="feature-copy">
+            <h3 class="feature-title">Your programs</h3>
+            <p>Keep several programs and switch the active one when your goals change. Bring in a new version when your AI revises the plan; earlier versions and the sessions trained with them stay in your history.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section trust" aria-labelledby="trust-title">
+      <div class="wrap">
+        <h2 id="trust-title" class="sr-only">Offline and privacy</h2>
+        <div class="trust-grid">
+          <div class="trust-item">
+            <h3 class="trust-title">Works with no signal</h3>
+            <p>Basement gyms and steel walls eat reception. Iron Oxide opens without a connection, keeps your sets on the phone and sends them as soon as it's back online. Add it to your home screen and it opens like an app.</p>
+          </div>
+          <div class="trust-item">
+            <h3 class="trust-title">Your data, in the EU</h3>
+            <ul class="facts">
+              <li>Hosted in the EU, in Frankfurt.</li>
+              <li>Sign in with a passkey or your Google account. No password to remember or leak.</li>
+              <!-- Update when the export and deletion screens (#118) ship in the app: "Export your data or delete your account from Settings, any time." -->
+              <li>Export your data or delete your account any time: those are your GDPR rights, and one-tap export and deletion are coming to Settings.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PENDING the maintainer's pricing decision (roadmap #86). Neutral placeholder: no prices, no plan names. -->
+    <section class="section pricing" aria-labelledby="pricing-title">
+      <div class="wrap pricing-inner">
+        <h2 id="pricing-title" class="section-title">Free during early access</h2>
+        <p>Iron Oxide is free to use while it's in early access.</p>
+      </div>
+    </section>
+
+    <section class="section final" aria-labelledby="final-title">
+      <div class="wrap final-inner">
+        <h2 id="final-title" class="statement">Your next session is one prompt away.</h2>
+        <a class="done-button" href="https://app.iron-oxyde.com">Start training</a>
+        <p class="final-note">Runs in your phone's browser at app.iron-oxyde.com. Nothing to install from a store.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap foot-inner">
+      <p>© 2026 Iron Oxide</p>
+      <nav aria-label="Legal and contact">
+        <ul class="foot-links">
+          <!-- PLACEHOLDER for the maintainer: link the privacy policy once it is published. -->
+          <li>Privacy policy (coming soon)</li>
+          <!-- PLACEHOLDER for the maintainer: a contact address, e.g. mailto:hello@iron-oxyde.com. -->
+          <li>Contact (coming soon)</li>
+        </ul>
+      </nav>
+    </div>
+  </footer>
+
+  <script src="copy.js" defer></script>
+</body>
+</html>

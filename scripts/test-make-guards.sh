@@ -7,7 +7,9 @@
 # run, a successful fetch and a clean `main` at exactly origin/main (not ahead, behind or
 # diverged), both before and after its `make check`, and deploys from a pristine export of the
 # commit; `make clean` and `make clean-all CONFIRM=1` refuse a target dir outside the checkout
-# without CONFIRM_SHARED=1; `make prune` refuses a target dir holding tracked files. And the suite itself passes when its caller sets CONFIRM=1 or
+# without CONFIRM_SHARED=1; `make prune` refuses a target dir holding tracked files; `make
+# landing-build` only replaces a directory strictly under dist/, inserts the prompt, strips comments and
+# refuses GitHub/open-source/licence mentions. And the suite itself passes when its caller sets CONFIRM=1 or
 # SKIP_SECRETS=1.
 set -euo pipefail
 
@@ -260,6 +262,60 @@ run ok "clean-all goes ahead with CONFIRM=1 CONFIRM_SHARED=1" "STUB cargo clean"
   clean-all CARGO="$stubs/cargo" CARGO_TARGET_DIR="$shared" CONFIRM=1 CONFIRM_SHARED=1 COMPOSE=echo
 run ok "clean accepts a relative target dir inside the checkout" "STUB cargo clean" -- \
   clean CARGO="$stubs/cargo" CARGO_TARGET_DIR=target
+
+# `make landing-build` (scripts/landing-build.py) replaces LANDING_OUT: only a plain directory
+# strictly under dist/ is accepted. It inserts programs/ai-prompt.md, strips maintainer comments and
+# refuses a page that mentions GitHub, open source or a licence.
+mkdir -p "$work/landing/fonts" "$work/schemas" "$work/programs" "$work/scripts" "$work/victim"
+cp "$root/scripts/landing-build.py" "$work/scripts/"
+landing_page() {
+  printf '<!-- note for maintainers: #70 -->\n<p>%s</p>\n<pre><!-- prompt:begin -->x<!-- prompt:end --></pre>\n' "$1" \
+    >"$work/landing/index.html"
+}
+landing_page 'Train'
+printf '/* copied from the app */\nbody { color: red; }\n' >"$work/landing/styles.css"
+echo 'SIL Open Font License' >"$work/landing/fonts/font-OFL.txt"
+echo '{"$id": "https://raw.githubusercontent.com/x"}' >"$work/schemas/program.schema.json"
+echo 'Ask me & then write <json>' >"$work/programs/ai-prompt.md"
+touch "$work/victim/keep"
+for out in landing . "$scratch" dist/.. dist/ dist "dist/x victim" "dist/x ~" "dist/*" ../dist/x; do
+  run fail "landing-build refuses LANDING_OUT='$out'" "strictly under dist/" -- landing-build LANDING_OUT="$out"
+done
+if [ -f "$work/landing/index.html" ] && [ -f "$work/victim/keep" ] && [ ! -e "$work/dist/x" ] \
+  && [ -d "$scratch/stubs" ]; then
+  echo "  ok    landing-build refusals deleted nothing"
+else
+  echo "  FAIL  landing-build refusals deleted nothing"
+  failures=$((failures + 1))
+fi
+mv "$work/programs/ai-prompt.md" "$work/programs/ai-prompt.md.off"
+run fail "landing-build fails without programs/ai-prompt.md" "the landing page needs the AI prompt" -- landing-build
+mv "$work/programs/ai-prompt.md.off" "$work/programs/ai-prompt.md"
+if [ ! -e "$work/dist/landing" ]; then
+  echo "  ok    a failed landing-build leaves no half-built site"
+else
+  echo "  FAIL  a failed landing-build leaves no half-built site"
+  failures=$((failures + 1))
+fi
+for word in 'Star us on GitHub' 'Open source' 'open-source' 'AGPL licence' 'MIT license'; do
+  landing_page "$word"
+  run fail "landing-build refuses a page saying '$word'" "must not mention GitHub, open source or a licence" -- \
+    landing-build
+done
+landing_page 'Train'
+echo 'See github.com/x' >"$work/programs/ai-prompt.md"
+run fail "landing-build refuses a prompt naming GitHub" "must not mention GitHub" -- landing-build
+echo 'Ask me & then write <json>' >"$work/programs/ai-prompt.md"
+run ok "landing-build assembles dist/landing" "Landing page: dist/landing" -- landing-build
+built=$work/dist/landing
+if [ -f "$built/program.schema.json" ] && [ -f "$built/fonts/font-OFL.txt" ] \
+  && grep -qF '<pre>Ask me &amp; then write &lt;json&gt;</pre>' "$built/index.html" \
+  && ! grep -q -e '<!--' -e '#70' "$built/index.html" && ! grep -qF '/*' "$built/styles.css"; then
+  echo "  ok    landing-build output: schema, fonts, escaped prompt, no maintainer comments"
+else
+  echo "  FAIL  landing-build output: schema, fonts, escaped prompt, no maintainer comments"
+  failures=$((failures + 1))
+fi
 
 # The suite must not depend on its caller: `make test-make` runs inside `make check`, itself inside
 # `make deploy CONFIRM=1`, and `make check SKIP_SECRETS=1` is documented.

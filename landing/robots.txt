@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://iron-oxyde.com/sitemap.xml
