@@ -10,6 +10,7 @@ use iron_oxide_domain::{
 };
 
 use super::account::Account;
+use super::appearance::AppearanceCard;
 use super::components::{Button, ButtonVariant, Card, Chip, LoadingState, Stepper, WeightStepper};
 use super::errors::{BannerKind, use_errors};
 use super::prefs::step_choices;
@@ -753,18 +754,6 @@ fn TrainingMaxLine(row: TrainingMaxRow, unit: Unit, on_saved: EventHandler<()>) 
             }
             if let Some(message) = problem.read().clone() {
                 p { class: "io-notice io-notice-error", role: "alert", "{message}" }
-            }
-        }
-    }
-}
-
-#[component]
-fn AppearanceCard() -> Element {
-    rsx! {
-        Card { title: "Appearance",
-            div { class: "io-setting",
-                span { class: "io-setting-name", "Theme" }
-                span { class: "io-muted", "Follows your device (dark or light)" }
             }
         }
     }

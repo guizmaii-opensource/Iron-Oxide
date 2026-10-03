@@ -1,6 +1,7 @@
 //! User interface: the app root, the shell and its pages, and the shared components.
 //!
 //! - `theme`: the stylesheet and the fonts.
+//! - `appearance`: the theme chosen on this device (System, Light or Dark), applied before paint.
 //! - `shell`: the routes, the layout with the bottom navigation, and the sign-in gate.
 //! - `components`: the reusable components.
 //! - `errors`: the banner every server error is reported to.
@@ -15,6 +16,7 @@
 //! - `session`: the workout session screens (#28).
 
 mod account;
+mod appearance;
 #[cfg_attr(
     not(debug_assertions),
     allow(
@@ -75,6 +77,7 @@ pub fn App() -> Element {
     rsx! {
         document::Title { "Iron Oxide" }
         PwaHead {}
+        appearance::ThemeHead {}
         document::Meta {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover",

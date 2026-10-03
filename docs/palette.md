@@ -1,14 +1,19 @@
 # Colours, type and components
 
-Iron Oxide uses the **Forge** direction (#26): dark-first, with a light theme that follows the
-system (`prefers-color-scheme`). It is meant to be read on a phone, at arm's length, under gym
-lighting: huge numerals, 72 px steppers, a 76 px Done button.
+Iron Oxide uses the **Forge** direction (#26): dark-first, with a light theme. Settings →
+Appearance chooses System (the default, follows `prefers-color-scheme`), Light or Dark, per device
+(#121). It is meant to be read on a phone, at arm's length, under gym lighting: huge numerals,
+72 px steppers, a 76 px Done button.
 
 Everything lives in one stylesheet, `crates/iron-oxide-app/assets/app.css`, loaded by the root
-component. Components use the `--io-*` tokens and never hard-code hex values. `data-theme="light"`
-or `data-theme="dark"` on an element forces one theme for its subtree (the component gallery uses
-it). The light tokens are written twice (in the media query and under `[data-theme="light"]`); a
-unit test keeps the two blocks identical.
+component. Components use the `--io-*` tokens and never hard-code hex values. An explicit choice
+is `data-theme="light"` or `data-theme="dark"` on the root element, set before the first paint by
+an inline script in `<head>` (`src/ui/appearance.rs`, which also sets the `theme-color` metas);
+System leaves it off. `data-theme` on any other element forces one theme for its subtree (the
+component gallery uses it). Dark is on `:root, [data-theme="dark"]`; light is on
+`[data-theme="light"]` and, repeated, in `@media (prefers-color-scheme: light) { :root:not([data-theme]) }`
+(CSS cannot share one block between a selector and a media query). Unit tests check that structure,
+that the two light blocks are identical and that both themes define every token.
 
 The dark ground `#121416` is also in `public/manifest.webmanifest` (`theme_color`,
 `background_color`) and in `THEME_COLOR` in `src/pwa.rs`; the light ground `#f1ede6` in

@@ -9,7 +9,7 @@ use iron_oxide_domain::Weight;
 use super::components::icons::PlateIcon;
 use super::components::{
     Button, ButtonVariant, Card, Chip, EmptyState, IconButton, LoadingState, ProgressSegments,
-    Sheet, Stepper, WeightStepper,
+    Segment, Segmented, Sheet, Stepper, WeightStepper,
 };
 use super::errors::{BannerKind, use_errors};
 use super::plates::{PlateLoadout, PlateSetup, PlateSource, plate_view};
@@ -26,7 +26,7 @@ pub fn Gallery() -> Element {
             for theme in ["dark", "light"] {
                 section { key: "{theme}", class: "io-gallery-theme", "data-theme": theme,
                     span { class: "io-label", "Theme · {theme}" }
-                    Showcase {}
+                    Showcase { theme }
                 }
             }
         }
@@ -35,7 +35,7 @@ pub fn Gallery() -> Element {
 
 /// One copy of every component, with live state.
 #[component]
-fn Showcase() -> Element {
+fn Showcase(theme: &'static str) -> Element {
     let errors = use_errors();
     let unit = use_unit();
     let mut reps = use_signal(|| 5_i64);
@@ -43,6 +43,7 @@ fn Showcase() -> Element {
     let mut plate = use_signal(|| 2_usize);
     let mut sets_done = use_signal(|| 2_u32);
     let mut sheet_open = use_signal(|| false);
+    let mut segment = use_signal(|| "light".to_owned());
     let target = weight_text(*weight.read(), unit);
 
     rsx! {
@@ -85,6 +86,19 @@ fn Showcase() -> Element {
                     "{label} kg"
                 }
             }
+        }
+
+        Segmented {
+            // One radio group per theme section.
+            name: "gallery-segmented-{theme}",
+            label: "Theme",
+            segments: vec![
+                Segment::new("system", "System"),
+                Segment::new("light", "Light"),
+                Segment::new("dark", "Dark"),
+            ],
+            selected: segment.read().clone(),
+            on_change: move |value| segment.set(value),
         }
 
         if sheet_open() {

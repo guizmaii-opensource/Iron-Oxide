@@ -2,12 +2,15 @@
  * Iron Oxide stylesheet: the "Forge" design tokens, the self-hosted fonts, the app shell and the
  * shared components (#26). The only stylesheet of the app; documented in docs/palette.md.
  *
- * Dark-first. The light theme follows `prefers-color-scheme: light`; `data-theme="light"` or
- * `data-theme="dark"` on any element forces one theme for its subtree (the component gallery
- * shows both side by side).
+ * Dark-first. The theme is chosen in Settings (System, Light or Dark, per device): an explicit
+ * choice is `data-theme="light"` or `data-theme="dark"` on the root element; System leaves it off
+ * and follows `prefers-color-scheme`. `data-theme` on any other element forces one theme for its
+ * subtree (the component gallery shows both side by side).
  *
- * Components use the tokens, never hex values. The two light blocks below must stay identical
- * (a unit test checks it, and the WCAG contrast of the text tokens, in `ui/theme.rs`).
+ * Components use the tokens, never hex values. Each theme has one table; the light one is also
+ * repeated inside the media query (CSS cannot share a block between a selector and a media
+ * query). Unit tests in `ui/theme.rs` check the structure, that the two light blocks are
+ * identical, that both themes define every token, and the WCAG contrast of the text tokens.
  */
 
 /* --- Fonts ------------------------------------------------------------------------------------ */
@@ -75,7 +78,7 @@
   --io-primary-strong: var(--io-accent-text);
 }
 
-/* Dark (default). */
+/* Dark: the default, and the explicit choice. */
 :root,
 [data-theme="dark"] {
   color-scheme: dark;
@@ -102,35 +105,8 @@
   --io-focus: #f08a4b;
 }
 
-/* light:begin */
-@media (prefers-color-scheme: light) {
-  :root {
-    color-scheme: light;
-    --io-ground: #f1ede6;
-    --io-surface: #ffffff;
-    --io-surface-edge: #e2dcd2;
-    --io-raised: #ece7df;
-    --io-chip: #e6e1d8;
-    --io-chip-ring: #17191c;
-    --io-track: #d6d0c6;
-    --io-track-soft: #ddd7cd;
-    --io-line: #d3ccc1;
-    --io-line-strong: #8c857b;
-    --io-text: #17191c;
-    --io-muted: #5f5850;
-    --io-accent: #e8703a;
-    --io-on-accent: #17191c;
-    --io-accent-text: #b04e1a;
-    --io-action: #17191c;
-    --io-on-action: #f1ede6;
-    --io-danger: #b3261e;
-    --io-success: #256b40;
-    --io-warning: #8a5a00;
-    --io-focus: #b04e1a;
-  }
-}
-/* light:end */
-
+/* Light, chosen in Settings (`data-theme` on the root, set before the first paint by
+ * `ui::appearance`) or forced on a subtree (the gallery). */
 /* light:begin */
 [data-theme="light"] {
   color-scheme: light;
@@ -155,6 +131,36 @@
   --io-success: #256b40;
   --io-warning: #8a5a00;
   --io-focus: #b04e1a;
+}
+/* light:end */
+
+/* Light from the system, only while no theme is chosen (System, the default). */
+/* light:begin */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --io-ground: #f1ede6;
+    --io-surface: #ffffff;
+    --io-surface-edge: #e2dcd2;
+    --io-raised: #ece7df;
+    --io-chip: #e6e1d8;
+    --io-chip-ring: #17191c;
+    --io-track: #d6d0c6;
+    --io-track-soft: #ddd7cd;
+    --io-line: #d3ccc1;
+    --io-line-strong: #8c857b;
+    --io-text: #17191c;
+    --io-muted: #5f5850;
+    --io-accent: #e8703a;
+    --io-on-accent: #17191c;
+    --io-accent-text: #b04e1a;
+    --io-action: #17191c;
+    --io-on-action: #f1ede6;
+    --io-danger: #b3261e;
+    --io-success: #256b40;
+    --io-warning: #8a5a00;
+    --io-focus: #b04e1a;
+  }
 }
 /* light:end */
 
@@ -584,6 +590,65 @@ button.io-chip {
   background: var(--io-accent);
   box-shadow: inset 0 0 0 2px var(--io-chip-ring);
   color: var(--io-on-accent);
+}
+
+/* --- Segmented control ------------------------------------------------------------------------ */
+/* One choice out of a few, as native radio buttons (a radio group for assistive technology, arrow
+   keys included): equal segments, 56 px high, selected like a chip (fill plus the 3:1 ring). */
+
+.io-segmented {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.io-segment {
+  position: relative;
+  display: flex;
+}
+
+.io-segment input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.io-segment span {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--io-tap);
+  padding: 0 8px;
+  border-radius: var(--io-radius-control);
+  background: var(--io-chip);
+  color: var(--io-text);
+  font-family: var(--io-font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.io-segment input:checked + span {
+  background: var(--io-accent);
+  box-shadow: inset 0 0 0 2px var(--io-chip-ring);
+  color: var(--io-on-accent);
+  font-weight: 700;
+}
+
+.io-segment input:focus-visible + span {
+  outline: 3px solid var(--io-focus);
+  outline-offset: 2px;
 }
 
 /* --- Progress --------------------------------------------------------------------------------- */

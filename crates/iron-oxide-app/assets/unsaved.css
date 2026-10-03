@@ -1,19 +1,17 @@
 /*
  * The "unsaved" indicator (#30, src/ui/unsaved.rs).
  *
- * Colours are the Forge tokens (UI.md: chip, line, text, muted, accent, accent-text, raised),
- * read from custom properties of those names when the theme stylesheet (#26) defines them, with
- * the Forge values as fallbacks for each scheme. Fold this file into the theme stylesheet once
- * it lands.
+ * Colours are the Forge tokens of app.css (#26), so the pill follows the theme chosen in Settings
+ * (#121) like the rest of the app.
  */
 .io-unsaved {
-  --unsaved-bg: var(--chip, #24282d);
-  --unsaved-border: var(--line, #3a3f46);
-  --unsaved-text: var(--text, #f2ece4);
-  --unsaved-muted: var(--muted, #a79f95);
-  --unsaved-dot: var(--accent, #e8703a);
-  --unsaved-alert: var(--accent-text, #f08a4b);
-  --unsaved-button: var(--raised, #2a2f35);
+  --unsaved-bg: var(--io-chip);
+  --unsaved-border: var(--io-line);
+  --unsaved-text: var(--io-text);
+  --unsaved-muted: var(--io-muted);
+  --unsaved-dot: var(--io-accent);
+  --unsaved-alert: var(--io-accent-text);
+  --unsaved-button: var(--io-raised);
 
   position: fixed;
   top: calc(env(safe-area-inset-top, 0px) + 8px);
@@ -33,18 +31,6 @@
   font-size: 14px;
   line-height: 1.25;
   box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
-}
-
-@media (prefers-color-scheme: light) {
-  .io-unsaved {
-    --unsaved-bg: var(--chip, #e6e1d8);
-    --unsaved-border: var(--line, #d3ccc1);
-    --unsaved-text: var(--text, #17191c);
-    --unsaved-muted: var(--muted, #5f5850);
-    --unsaved-dot: var(--accent, #e8703a);
-    --unsaved-alert: var(--accent-text, #b04e1a);
-    --unsaved-button: var(--raised, #ece7df);
-  }
 }
 
 .io-unsaved--failed {

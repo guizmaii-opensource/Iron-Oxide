@@ -133,9 +133,67 @@ mod tests {
                 .map(str::to_owned)
                 .collect()
         };
-        assert!(blocks[0].contains("@media (prefers-color-scheme: light)"));
+        assert!(
+            blocks[0]
+                .trim_start()
+                .starts_with("[data-theme=\"light\"] {")
+        );
+        assert!(
+            blocks[1]
+                .trim_start()
+                .starts_with("@media (prefers-color-scheme: light) {\n  :root:not([data-theme]) {")
+        );
         assert_eq!(declarations(&blocks[0]), declarations(&blocks[1]));
         assert!(declarations(&blocks[0]).len() > 10);
+    }
+
+    /// One table per theme (#121): dark on the root and on `data-theme="dark"`, light on
+    /// `data-theme="light"` and, while nothing is chosen, from the system. Nowhere else.
+    #[test]
+    fn each_theme_is_defined_by_its_selectors_only() {
+        let css = css();
+        let mut rules: Vec<String> = Vec::new();
+        for (index, _) in css.match_indices("--io-ground:") {
+            let open = css[..index].rfind('{').unwrap();
+            let rule_start = css[..open].rfind(['}', '/', '{']).map_or(0, |end| end + 1);
+            rules.push(css[rule_start..open].trim().to_owned());
+        }
+        assert_eq!(
+            rules,
+            [
+                ":root,\n[data-theme=\"dark\"]",
+                "[data-theme=\"light\"]",
+                ":root:not([data-theme])",
+            ]
+        );
+        // The system's light theme yields to an explicit choice, and no rule forces a theme by
+        // the dark media query: dark is the default.
+        assert_eq!(
+            css.matches("@media (prefers-color-scheme: light)").count(),
+            1
+        );
+        assert!(!css.contains("prefers-color-scheme: dark"));
+        assert_eq!(css.matches("color-scheme: dark;").count(), 1);
+        assert_eq!(css.matches("color-scheme: light;").count(), 2);
+    }
+
+    /// Every other stylesheet takes its colours from the tokens, so it follows the chosen theme
+    /// rather than the system's.
+    #[test]
+    fn other_stylesheets_do_not_follow_the_system_theme() {
+        let unsaved = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/unsaved.css"),
+        )
+        .unwrap();
+        assert!(!unsaved.contains("prefers-color-scheme"));
+        let colours: Vec<&str> = unsaved
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("--unsaved-"))
+            .collect();
+        assert!(colours.len() > 5);
+        for colour in colours {
+            assert!(colour.contains(": var(--io-"), "{colour}");
+        }
     }
 
     #[test]
