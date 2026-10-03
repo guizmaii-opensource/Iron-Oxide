@@ -1783,6 +1783,31 @@ a.io-chip {
   white-space: nowrap;
 }
 
+/* --- Your data (#118) ----------------------------------------------------------------------- */
+
+.io-textarea {
+  min-height: calc(var(--io-tap) * 2);
+  padding: 12px 16px;
+  font-family: var(--io-font-mono);
+  font-size: 14px;
+  resize: vertical;
+}
+
+.io-import-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.io-import-preview ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.io-your-data .io-file-button {
+  width: 100%;
+}
+
 /* --- Component gallery (debug builds) --------------------------------------------------------- */
 
 .io-gallery-theme {
