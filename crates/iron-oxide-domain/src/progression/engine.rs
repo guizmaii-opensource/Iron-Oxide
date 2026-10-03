@@ -9,7 +9,7 @@ use super::target::{ExerciseTargets, NextTargets, SetGoal, SetTarget, TargetSour
 use crate::program::{
     Deload, Exercise, Load, ProgressionRule, RepTarget, UnitWeight, WarmupLoad, Work,
 };
-use crate::{Percent, Reps, Rounding, Weight};
+use crate::{Percent, Reps, Rounding, Unit, Weight};
 
 /// How a past session went against its own prescription. See the
 /// [module documentation](super) for the exact definitions.
@@ -84,11 +84,13 @@ pub fn next_targets(
                 target: reps,
                 planned: Outcome {
                     increment: increment.weight(),
+                    increment_unit: increment.unit(),
                     deload: deload_after_failures,
                     double: false,
                 },
                 default: default_weight.unwrap_or(Weight::ZERO),
                 step,
+                unit: settings.unit(),
             },
         ),
         (
@@ -104,11 +106,13 @@ pub fn next_targets(
                 target: reps,
                 planned: Outcome {
                     increment: increment.weight(),
+                    increment_unit: increment.unit(),
                     deload: deload_after_failures,
                     double: true,
                 },
                 default: default_weight.unwrap_or(Weight::ZERO),
                 step,
+                unit: settings.unit(),
             },
         ),
         (
@@ -127,6 +131,7 @@ pub fn next_targets(
                     training_max,
                     planned: Outcome {
                         increment: increment.weight(),
+                        increment_unit: increment.unit(),
                         deload: deload_after_failures,
                         double: false,
                     },
@@ -368,6 +373,8 @@ fn uniform_sets(sets: u16, weight: Option<Weight>, goal: SetGoal) -> Vec<SetTarg
 #[derive(Clone, Copy)]
 struct Outcome {
     increment: Weight,
+    /// The unit the program wrote the increment in: in the lifter's unit, it is added as written.
+    increment_unit: Unit,
     deload: Option<Deload>,
     double: bool,
 }
@@ -376,6 +383,7 @@ impl Outcome {
     /// Nothing: no increment, no deload.
     const NOTHING: Self = Self {
         increment: Weight::ZERO,
+        increment_unit: Unit::Kg,
         deload: None,
         double: false,
     };
@@ -393,6 +401,7 @@ impl Outcome {
                 deload_after_failures,
             } => Self {
                 increment: increment.weight(),
+                increment_unit: increment.unit(),
                 deload: deload_after_failures,
                 double: false,
             },
@@ -401,6 +410,7 @@ impl Outcome {
                 deload_after_failures,
             } => Self {
                 increment: increment.weight(),
+                increment_unit: increment.unit(),
                 deload: deload_after_failures,
                 double: true,
             },
@@ -416,6 +426,7 @@ impl Outcome {
                 deload_after_failures,
             } => Self {
                 increment: increment.weight(),
+                increment_unit: increment.unit(),
                 deload: deload_after_failures,
                 double: false,
             },
@@ -435,6 +446,8 @@ struct WeightRule {
     /// The base when a session has no weighted prescribed set and no fixed prescribed load.
     default: Weight,
     step: Weight,
+    /// The lifter's unit: an increment written in it is added as written.
+    unit: Unit,
 }
 
 /// Where the reps of the planned sets go after the last session, for double progression.
@@ -481,7 +494,12 @@ fn weight_rule(sessions: &[&PastSession], rule: &WeightRule) -> Plan {
         let kind = match verdict {
             SessionVerdict::Success => {
                 failures = 0;
-                let to = increase(base, outcome.increment, rule.step);
+                let to = increase(
+                    base,
+                    outcome.increment,
+                    outcome.increment_unit == rule.unit,
+                    rule.step,
+                );
                 if to > base {
                     weight = to;
                     next_reps = NextReps::Bottom;
@@ -777,15 +795,21 @@ fn fixed_warmup(
     }
 }
 
-/// `base + increment`, rounded to the nearest step, or up when the nearest does not move it (an
-/// increment smaller than half a step), or down when rounding up passes [`Weight::MAX`], or the
-/// exact sum as a last resort. Returns `base` when nothing heavier can be loaded (at
-/// [`Weight::MAX`], or a zero increment).
-fn increase(base: Weight, increment: Weight, step: Weight) -> Weight {
+/// `base + increment`. An increment the program wrote in the lifter's unit (`as_written`) is added
+/// exactly: the program's own increment wins over the step (#120), so a program that adds 1 kg
+/// goes 100 → 101 kg whatever the step. One written in the other unit (5 lb for a lifter in kg) is
+/// a conversion, never loadable as is: the sum is rounded to the nearest step, or up when the
+/// nearest does not move it, or down when rounding up passes [`Weight::MAX`], or kept exact as a
+/// last resort. Returns `base` when nothing heavier can be loaded (at [`Weight::MAX`], or a zero
+/// increment).
+fn increase(base: Weight, increment: Weight, as_written: bool, step: Weight) -> Weight {
     if increment.is_zero() {
         return base;
     }
     let raw = base.checked_add(increment).unwrap_or(Weight::MAX);
+    if as_written {
+        return raw.max(base);
+    }
     [Rounding::Nearest, Rounding::Up, Rounding::Down]
         .into_iter()
         .filter_map(|rounding| raw.round_to(step, rounding).ok())
@@ -1260,36 +1284,57 @@ mod tests {
     }
 
     #[test]
-    fn increase_rounds_to_the_step() {
+    fn a_converted_increment_rounds_to_the_step() {
         let step = kg(STEP_KG);
-        assert_eq!(increase(kg(100.0), kg(2.5), step), kg(102.5));
-        assert_eq!(increase(kg(100.0), kg(5.0), step), kg(105.0));
+        assert_eq!(increase(kg(100.0), kg(2.5), false, step), kg(102.5));
+        assert_eq!(increase(kg(100.0), kg(5.0), false, step), kg(105.0));
         // Smaller than the step: goes up to the next step instead of stalling.
-        assert_eq!(increase(kg(100.0), kg(1.0), step), kg(102.5));
+        assert_eq!(increase(kg(100.0), kg(1.0), false, step), kg(102.5));
         // Off the grid: nearest step above.
-        assert_eq!(increase(kg(101.0), kg(2.5), step), kg(102.5));
-        assert_eq!(increase(kg(101.0), kg(1.0), step), kg(102.5));
+        assert_eq!(increase(kg(101.0), kg(2.5), false, step), kg(102.5));
+        assert_eq!(increase(kg(101.0), kg(1.0), false, step), kg(102.5));
         // Pounds.
         let step = lb(5.0);
-        assert_eq!(increase(lb(225.0), lb(5.0), step), lb(230.0));
-        assert_eq!(increase(lb(225.0), lb(2.5), step), lb(230.0));
+        assert_eq!(increase(lb(225.0), lb(5.0), false, step), lb(230.0));
+        assert_eq!(increase(lb(225.0), lb(2.5), false, step), lb(230.0));
         // A kg increment on a lb grid.
-        assert_eq!(increase(lb(225.0), kg(2.5), step), lb(230.0));
+        assert_eq!(increase(lb(225.0), kg(2.5), false, step), lb(230.0));
         // Zero increment and the cap.
-        assert_eq!(increase(kg(100.0), Weight::ZERO, kg(STEP_KG)), kg(100.0));
-        assert_eq!(increase(Weight::MAX, kg(2.5), kg(STEP_KG)), Weight::MAX);
+        assert_eq!(
+            increase(kg(100.0), Weight::ZERO, false, kg(STEP_KG)),
+            kg(100.0)
+        );
+        assert_eq!(
+            increase(Weight::MAX, kg(2.5), false, kg(STEP_KG)),
+            Weight::MAX
+        );
         let top = Weight::MAX.round_to(step, Rounding::Down).unwrap();
         assert_eq!(
-            increase(top, lb(5.0), step),
+            increase(top, lb(5.0), false, step),
             Weight::MAX,
             "the exact sum, capped"
         );
-        assert_eq!(increase(Weight::MAX, lb(5.0), step), Weight::MAX);
+        assert_eq!(increase(Weight::MAX, lb(5.0), false, step), Weight::MAX);
         // Rounding up would pass the cap, rounding down still moves: the step below the cap.
         let below = top.saturating_sub(lb(1.0));
-        assert_eq!(increase(below, lb(5.0), step), top);
+        assert_eq!(increase(below, lb(5.0), false, step), top);
         // From zero (a body-weight log), a small increment goes to the first step.
-        assert_eq!(increase(Weight::ZERO, kg(0.5), kg(STEP_KG)), kg(2.5));
+        assert_eq!(increase(Weight::ZERO, kg(0.5), false, kg(STEP_KG)), kg(2.5));
+    }
+
+    #[test]
+    fn an_increment_in_the_lifters_unit_is_added_as_written() {
+        // The program's increment wins over the step (#120): 1 kg on a 2.5 kg step is 1 kg, and
+        // 2.5 kg on a 5 kg step is 2.5 kg.
+        assert_eq!(increase(kg(100.0), kg(1.0), true, kg(2.5)), kg(101.0));
+        assert_eq!(increase(kg(100.0), kg(2.5), true, kg(5.0)), kg(102.5));
+        assert_eq!(increase(kg(100.0), kg(5.0), true, kg(1.25)), kg(105.0));
+        assert_eq!(increase(lb(225.0), lb(2.5), true, lb(10.0)), lb(227.5));
+        // Off the grid, kept off the grid: the base was lifted, the increment is the program's.
+        assert_eq!(increase(kg(101.0), kg(2.5), true, kg(2.5)), kg(103.5));
+        // Capped, and never lighter.
+        assert_eq!(increase(Weight::MAX, kg(2.5), true, kg(2.5)), Weight::MAX);
+        assert_eq!(increase(kg(100.0), Weight::ZERO, true, kg(2.5)), kg(100.0));
     }
 
     #[test]

@@ -401,12 +401,26 @@ mod add_when_top_of_range {
             deload_after_failures: None,
         };
         let history = [session(kg(40.0), &[5, 5, 5])];
-        // With the default 2.5 kg step, +1 kg still moves to the next step.
+        // The program's increment, in the lifter's unit, wins over the step (#120): +1 kg is
+        // +1 kg with the default 2.5 kg step, with 1 kg micro-plates, and with a 5 kg step.
+        assert_eq!(working(&targets(&press, &history)).0, kg(41.0));
+        for step in [1.0, 5.0] {
+            let settings = ProgressionSettings::new(Unit::Kg, kg(step)).unwrap();
+            let next = ready(plan(&press, None, settings, &history));
+            assert_eq!(working(&next).0, kg(41.0), "{step} kg step");
+        }
+        // Written in the other unit (2.5 lb for a lifter in kg), it is a conversion: rounded to
+        // the step, and at least one step up.
+        press.progression = ProgressionRule::AddWhenTopOfRange {
+            increment: unit_weight(2.5, Unit::Lb),
+            deload_after_failures: None,
+        };
         assert_eq!(working(&targets(&press, &history)).0, kg(42.5));
-        // With 1 kg micro-plates, exactly +1 kg.
-        let fine = ProgressionSettings::new(Unit::Kg, kg(1.0)).unwrap();
-        let next = ready(plan(&press, None, fine, &history));
-        assert_eq!(working(&next).0, kg(41.0));
+        let five = ProgressionSettings::new(Unit::Kg, kg(5.0)).unwrap();
+        assert_eq!(
+            working(&ready(plan(&press, None, five, &history))).0,
+            kg(45.0)
+        );
     }
 }
 
@@ -1174,6 +1188,39 @@ mod review_cases {
         for settings in all {
             let next = ready(plan(&bench, Some(kg(121.0)), settings, &failed));
             assert_eq!(next.training_max, Some(kg(108.9)), "{settings:?}");
+        }
+    }
+
+    /// #120: training max weights follow the lifter's step, 1.25 / 2.5 / 5 kg and 2.5 / 5 / 10 lb;
+    /// the training max itself never depends on it.
+    #[test]
+    fn training_max_weights_follow_the_lifters_step() {
+        let cases = [
+            (kg(121.0), Unit::Kg, kg(1.25), kg(96.25)),
+            (kg(121.0), Unit::Kg, kg(2.5), kg(97.5)),
+            (kg(121.0), Unit::Kg, kg(5.0), kg(95.0)),
+            (lb(318.0), Unit::Lb, lb(2.5), lb(255.0)),
+            (lb(318.0), Unit::Lb, lb(5.0), lb(255.0)),
+            (lb(318.0), Unit::Lb, lb(10.0), lb(250.0)),
+        ];
+        for (training_max, unit, step, expected) in cases {
+            let settings = ProgressionSettings::new(unit, step).unwrap();
+            let first = ready(plan(&bench(), Some(training_max), settings, &[]));
+            let (weight, _) = working(&first);
+            assert_eq!(weight, expected, "{step:?}");
+            // Done as shown (logged with its target): a success, the training max +2.5 kg.
+            let done: Sets = first
+                .working
+                .iter()
+                .map(|target| WorkingSet::new(weight, Reps::new(5)).prescribed(*target))
+                .collect();
+            let next = ready(plan(&bench(), Some(training_max), settings, &[done]));
+            assert_eq!(next.last_verdict, Some(SessionVerdict::Success), "{step:?}");
+            assert_eq!(
+                next.training_max,
+                Some(training_max.checked_add(kg(2.5)).unwrap()),
+                "{step:?}"
+            );
         }
     }
 

@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 use dioxus::logger::tracing;
 use iron_oxide_domain::{
     DayId, E1rmFormula, ExerciseId, LoggedSet, PerformedSet, Reps, Seconds, Session, SessionId,
-    SessionLog, SessionOutcome, SessionStatus, Unit, Weight, detect_prs, next_day,
+    SessionLog, SessionOutcome, SessionStatus, Weight, detect_prs, next_day,
     program::{Load, Program},
     progression::{
         NextTargets, Prescription, ProgressionSettings, SetTarget, exercise_history, next_targets,
@@ -379,19 +379,18 @@ impl Context {
                 .or_default()
                 .push(domain_set(&set)?);
         }
-        let settings = db::settings::find(pool, owner)
-            .await?
-            .unwrap_or_else(db::settings::UserSettings::defaults);
-        let unit = match settings.unit {
-            db::settings::Unit::Kg => Unit::Kg,
-            db::settings::Unit::Lb => Unit::Lb,
-        };
+        // The lifter's own step for their unit, never finer than their plates load (#120).
+        let settings = super::settings::get(pool, owner).await?;
         Ok(Self {
             sessions,
             sets,
             programs: HashMap::new(),
             training_maxes: db::training_maxes::list(pool, owner).await?,
-            settings: ProgressionSettings::for_unit(unit),
+            settings: ProgressionSettings::for_lifter(
+                settings.unit,
+                settings.weight_step(settings.unit),
+                &settings.plate_inventory,
+            ),
         })
     }
 
@@ -1518,6 +1517,67 @@ mod tests {
             bench_targets,
             &NextTargets::NeedsTrainingMax { exercise: bench() }
         );
+    }
+
+    /// #120: the plan rounds to the lifter's own step, never finer than their plates. Bench is
+    /// 80 % of a 96.75 kg training max, 77.4 kg: 77.5 kg with the default 2.5 kg step and plates,
+    /// 75 kg for a lifter whose smallest plates are 2.5 kg (a 5 kg change), and 75 kg too with a
+    /// 5 kg step whatever the plates.
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn the_plan_rounds_to_the_lifters_step_and_plates(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let cases = [
+            (None, None, 77.5),
+            (
+                Some(json!([{ "plate": 20, "pairs": 4 }, { "plate": 2.5, "pairs": 2 }])),
+                None,
+                75.0,
+            ),
+            (None, Some(5.0), 75.0),
+            (None, Some(1.25), 77.5),
+        ];
+        for (i, (plates, step, expected)) in cases.into_iter().enumerate() {
+            let mut user = api.user(&format!("U{i}")).await;
+            active_program(&api, &user).await;
+            if plates.is_some() || step.is_some() {
+                let default_plates = json!([
+                    { "plate": 25, "pairs": 4 }, { "plate": 20, "pairs": 2 },
+                    { "plate": 15, "pairs": 1 }, { "plate": 10, "pairs": 1 },
+                    { "plate": 5, "pairs": 1 }, { "plate": 2.5, "pairs": 1 },
+                    { "plate": 1.25, "pairs": 1 }
+                ]);
+                let update = json!({ "settings": {
+                    "unit": "kg", "bar_weight": 20, "default_rest": 120, "sound_enabled": true,
+                    "plate_inventory": plates.unwrap_or(default_plates),
+                    "kg_weight_step": step.unwrap_or(2.5),
+                } });
+                call::<Value>(&mut user, "/api/settings/update", update)
+                    .await
+                    .unwrap();
+            }
+            training_maxes::set(
+                &api.db,
+                user.id,
+                &training_maxes::TrainingMax {
+                    exercise_id: "bench-press".to_owned(),
+                    weight_ng: kg(96.75).as_nanograms(),
+                    set_at: offset_date_time(t(-10)).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+            squat_session(&mut user, 0, 5, 100.0, SessionOutcome::Completed).await;
+            let next: NextSessionPlan = call(&mut user, NEXT_PLAN, json!({})).await.unwrap();
+            let bench_targets = next.exercises[1].targets.ready().unwrap();
+            assert!(
+                bench_targets
+                    .working
+                    .iter()
+                    .all(|target| target.weight == Some(kg(expected))),
+                "case {i}: {bench_targets:?}"
+            );
+        }
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]

@@ -92,8 +92,10 @@
 //!
 //! # Rules
 //!
-//! Every computed weight is rounded to the settings' loadable [step](ProgressionSettings::step)
-//! (2.5 kg or 5 lb by default); see [Rounding](#rounding).
+//! Every computed weight is rounded to the settings' loadable [step](ProgressionSettings::step);
+//! see [Rounding](#rounding). The app builds the settings with
+//! [`ProgressionSettings::for_lifter`] (#120): the lifter's own weight step for their unit (2.5 kg
+//! or 5 lb by default), never finer than a pair of the smallest plate they own.
 //!
 //! - **None** (and every timed exercise, which cannot have a rule): no progression. The targets
 //!   are the last performance, else the program default.
@@ -160,9 +162,11 @@
 //!   lifter's unit, they are kept as written (a 24 kg kettlebell stays 24 kg). A fixed warm-up
 //!   lighter than the working weight stays lighter: if rounding would reach the working weight, it
 //!   is kept exact;
-//! - an increase to the nearest step, or the next step up when the nearest would not move it, so
-//!   an increment smaller than the step still progresses (100 kg + 1 kg with a 2.5 kg step is
-//!   102.5 kg);
+//! - an increase: the program's increment **wins over the step** when it is written in the
+//!   lifter's unit, and is added as written (100 kg + 1 kg is 101 kg whatever the step; #120).
+//!   Written in the other unit (a 5 lb increment for a lifter in kg), it is a conversion: rounded
+//!   to the nearest step, or the next step up when the nearest would not move it, so it still
+//!   progresses (100 kg + 2.5 lb with a 2.5 kg step is 102.5 kg);
 //! - a percentage of the training max to the nearest step (the training max itself is never
 //!   rounded);
 //! - a weight deload, and a warm-up percentage of the working weight, to the nearest step, or down when

@@ -411,6 +411,12 @@ Sign-in keeps its own module and `AuthError` (see [Layout](#layout)); these two 
   must keep at least one plate size. Each weight step must be more than 0 and at most 25 kg
   (`MAX_WEIGHT_STEP_KG`). Each refusal is an `InvalidField` naming `bar_weight`,
   `plate_inventory`, `default_rest`, `kg_weight_step` or `lb_weight_step`.
+- **The weight step drives the progression too (#120).** The session plans and summaries
+  round with `ProgressionSettings::for_lifter`: the step for the lifter's unit, raised to a
+  multiple of a pair of their smallest plate when it is finer than their plates can load (1.25 kg
+  with 1.25 kg plates steps by 2.5 kg). A program's increment written in the lifter's unit is
+  added as written. Past verdicts never depend on it: sets are judged against their stored target
+  (#60). Changing the step or the plates changes the next targets only.
 - **Weight step and vibration (#103)** used to be kept on the device. On the first load after
   #103, the app carries a value still on the device over into a setting the server has at its
   default, saves it, and removes the device's copy.
