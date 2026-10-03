@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 use crate::auth::browser;
 use crate::offline::{OutboxStatus, use_outbox};
 
-/// Its styles: Forge tokens (#26) with literal fallbacks, until the theme stylesheet takes them.
+/// Its styles, in the Forge tokens of `app.css` (#26), so it follows the chosen theme.
 const UNSAVED_CSS: Asset = asset!("/assets/unsaved.css");
 
 /// Asked before giving up the refused writes and those that depend on them (a refused start
