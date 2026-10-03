@@ -29,6 +29,11 @@ pub struct LocalSession {
     /// Set once the user ended the session, until the screen clears the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<LocalFinish>,
+    /// The session screen's own state, opaque here (`crate::ui::session::local`): the plan, a
+    /// settings snapshot, the exercises skipped, the values being entered and the rest timer, so
+    /// an offline reload lands on the same set with the same values. Cleared with the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<serde_json::Value>,
 }
 
 /// How and when the user ended the session.
@@ -115,6 +120,7 @@ mod tests {
             day: "a".parse().unwrap(),
             sets: Vec::new(),
             finished: None,
+            screen: None,
         }
     }
 
@@ -169,6 +175,32 @@ mod tests {
         let local = session();
         local.save(&storage, user(1)).unwrap();
         assert_eq!(LocalSession::load(&storage, user(1)), Some(local));
+    }
+
+    #[test]
+    fn the_screen_state_is_kept_and_older_records_still_load() {
+        let storage = MemoryStorage::default();
+        let mut local = session();
+        local.screen = Some(serde_json::json!({ "skipped": ["plank"] }));
+        local.save(&storage, user(1)).unwrap();
+        assert_eq!(LocalSession::load(&storage, user(1)), Some(local.clone()));
+        // A record saved before the screen state existed reads with none.
+        let key = storage::key("session", user(1));
+        let mut old = serde_json::to_value(&local).unwrap();
+        old.as_object_mut().unwrap().remove("screen");
+        storage
+            .set(
+                &key,
+                &serde_json::json!({ "v": 1, "data": old }).to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            LocalSession::load(&storage, user(1)),
+            Some(LocalSession {
+                screen: None,
+                ..local
+            })
+        );
     }
 
     #[test]

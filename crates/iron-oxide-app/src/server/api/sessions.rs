@@ -37,6 +37,7 @@ use sqlx::PgPool;
 use super::{ApiError, error::SESSION_IN_PROGRESS, offset_date_time, timestamp};
 use crate::api::sessions::{
     NextSessionPlan, PlannedExercise, SessionPlan, SessionSummary, SessionView, SessionWithSets,
+    StartChoice,
 };
 use crate::server::db::{
     self,
@@ -51,13 +52,14 @@ pub async fn get(pool: &PgPool, owner: UserId, id: SessionId) -> Result<SessionV
     view(db::sessions::get(pool, owner, id.into()).await?)
 }
 
-/// Starts session `id` of the active program on the next day of its rotation. See
-/// `crate::api::sessions::start_session`.
+/// Starts session `id`: on the program version and day the device chose, or else on the active
+/// program's next day. See `crate::api::sessions::start_session`.
 pub async fn start(
     pool: &PgPool,
     owner: UserId,
     id: SessionId,
     started_at: Timestamp,
+    choice: Option<StartChoice>,
 ) -> Result<SessionView, ApiError> {
     let started = offset_date_time(started_at)?;
     // A retry returns the session it created, whatever happened since (ended, a new program
@@ -75,15 +77,50 @@ pub async fn start(
     {
         return Err(ApiError::conflict(SESSION_IN_PROGRESS));
     }
-    let next = Next::load(pool, owner).await?;
+    let (version, day) = match choice {
+        Some(choice) => chosen(pool, owner, &choice).await?,
+        None => {
+            let next = Next::load(pool, owner).await?;
+            (next.version, next.day)
+        }
+    };
     let new = db::sessions::NewSession {
         id: id.into(),
-        program_version_id: next.version,
-        day_id: next.day.as_str().to_owned(),
+        program_version_id: version,
+        day_id: day.as_str().to_owned(),
         started_at: started,
     };
     db::sessions::start(pool, owner, &new).await?;
     get(pool, owner, id).await
+}
+
+/// Shown when a start names a program version that is not the user's, or not of that program.
+pub const START_VERSION_GONE: &str =
+    "This workout's program is not available any more. Discard it and start again.";
+
+/// Shown when a start names a day its program version does not have.
+pub const START_DAY_MISSING: &str = "This workout's day is not in its program.";
+
+/// The version and day of a start that names them: checked, never re-picked.
+async fn chosen(
+    pool: &PgPool,
+    owner: UserId,
+    choice: &StartChoice,
+) -> Result<(ProgramVersionId, DayId), ApiError> {
+    let version =
+        match db::programs::get_version(pool, owner, choice.program_version_id.into()).await {
+            Ok(version) => version,
+            Err(RepoError::NotFound) => return Err(ApiError::conflict(START_VERSION_GONE)),
+            Err(error) => return Err(error.into()),
+        };
+    if version.program_id != choice.program_id.into() {
+        return Err(ApiError::conflict(START_VERSION_GONE));
+    }
+    let program = parse_program(&version.document)?;
+    if program.day(&choice.day).is_none() {
+        return Err(ApiError::invalid(START_DAY_MISSING));
+    }
+    Ok((version.id, choice.day.clone()))
 }
 
 /// What the user trains next: the active program's latest version and the next day of its
@@ -1185,6 +1222,64 @@ mod tests {
         let fifth = start(&mut a, SessionId::new_v7(), t(240)).await.unwrap();
         assert_eq!(fifth.day.as_str(), "a");
         assert_eq!(fifth.program_id, other.id.into());
+    }
+
+    /// Review of #113: a start queued behind the previous finish is recorded on the day the
+    /// device chose, not on the next day of the rotation once that finish arrived.
+    #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]
+    #[ignore = "needs Postgres"]
+    async fn start_session_records_the_chosen_day(db: PgPool) {
+        let api = TestApi::new(db).await;
+        let mut a = api.user("A").await;
+        let program = active_program(&api, &a).await;
+        let version = db::programs::latest_version(&api.db, a.id, program.into())
+            .await
+            .unwrap();
+        // Day a done: the rotation now says b, but the device started a (again) offline.
+        squat_session(&mut a, 0, 5, 100.0, SessionOutcome::Completed).await;
+        let choice = |day: &str| {
+            json!({
+                "program_id": program,
+                "program_version_id": iron_oxide_domain::ProgramVersionId::from(version.id),
+                "day": day,
+            })
+        };
+        let id = SessionId::new_v7();
+        let body = json!({ "session_id": id, "started_at": t(60), "choice": choice("a") });
+        let view: SessionView = call(&mut a, START, body.clone()).await.unwrap();
+        assert_eq!(view.day.as_str(), "a");
+        assert_eq!(view.program_version_id, version.id.into());
+        // A replay returns it unchanged.
+        let again: SessionView = call(&mut a, START, body).await.unwrap();
+        assert_eq!(again, view);
+        finish(&mut a, id, SessionOutcome::Abandoned, t(61))
+            .await
+            .unwrap();
+
+        // A day the version lacks: 422. Another user's version or a wrong program: 409.
+        let missing = json!({ "session_id": SessionId::new_v7(), "started_at": t(70), "choice": choice("z") });
+        let message = assert_status(
+            call::<SessionView>(&mut a, START, missing).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+        assert_eq!(message, START_DAY_MISSING);
+        let mut b = api.user("B").await;
+        active_program(&api, &b).await;
+        let foreign = json!({ "session_id": SessionId::new_v7(), "started_at": t(70), "choice": choice("a") });
+        let message = assert_status(
+            call::<SessionView>(&mut b, START, foreign).await,
+            StatusCode::CONFLICT,
+        );
+        assert_eq!(message, START_VERSION_GONE);
+        let mut wrong = choice("a");
+        wrong["program_id"] = json!(ProgramId::new_v7());
+        let mismatch =
+            json!({ "session_id": SessionId::new_v7(), "started_at": t(70), "choice": wrong });
+        let message = assert_status(
+            call::<SessionView>(&mut a, START, mismatch).await,
+            StatusCode::CONFLICT,
+        );
+        assert_eq!(message, START_VERSION_GONE);
     }
 
     #[sqlx::test(migrator = "crate::server::db::MIGRATOR")]

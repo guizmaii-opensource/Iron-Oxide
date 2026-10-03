@@ -1,8 +1,10 @@
 //! The active session screen (#28): one set at a time, with its steppers and Done.
 //!
-//! A set is saved when Done is tapped. If the save fails, the set is kept exactly as it was sent
-//! (same id, values and time) and Done becomes "Retry save" with the steppers locked: resending
-//! the identical set is idempotent, whereas a new one could log the same set twice.
+//! Done queues the set in the offline outbox (#107, through `super::writes`) and moves on at once:
+//! the outbox delivers it, in order, retrying the same set (same id, values and time). The screen
+//! shows which sets are still saving or were refused. Every change (a set, a skip, the values
+//! being entered, the rest) is saved in the session record on the device (`super::local`), so a
+//! reload, even offline, lands on the same set with the same values.
 
 use std::rc::Rc;
 
@@ -11,19 +13,20 @@ use iron_oxide_domain::program::Exercise;
 use iron_oxide_domain::progression::{NextTargets, SetGoal};
 use iron_oxide_domain::time::Timestamp;
 use iron_oxide_domain::timer::{HoldTimer, IntervalPhase, IntervalTimer};
-use iron_oxide_domain::{LoggedSet, Reps, SessionOutcome, SetId, Weight};
+use iron_oxide_domain::{Reps, SessionOutcome, SetId, Weight};
 
 use super::flow::{self, Entry, Step};
+use super::local::{self, Draft};
 use super::rest::{self, Rest, RestScreen};
 use super::summary::Finished;
-use super::{Active, forget, note, platform, store_skipped, writes};
-use crate::api::error::{ApiFailure, FailureKind};
+use super::{Active, NOT_SIGNED_IN, note, platform, writes};
 use crate::auth::browser::sleep;
+use crate::offline::{LocalFinish, use_outbox};
 use crate::ui::components::icons::PlateIcon;
 use crate::ui::components::{
     Button, ButtonVariant, Chip, IconButton, ProgressSegments, Sheet, Stepper, WeightStepper,
 };
-use crate::ui::errors::use_errors;
+use crate::ui::errors::{BannerKind, use_errors};
 use crate::ui::plates::PlateCalculatorSheet;
 use crate::ui::shell::Route;
 use crate::ui::weight::use_unit;
@@ -35,39 +38,57 @@ enum Ask {
     Finish,
 }
 
-/// The session in progress. `on_reload` reloads it from the server (after a conflict);
-/// `on_finished` receives the summary of a completed workout.
+/// The session in progress, from the record or the server, with the values being entered and the
+/// rest that were saved with it. `on_finished` receives a completed workout, for its summary.
 #[component]
 pub fn Workout(
     initial: Active,
-    on_reload: EventHandler<()>,
+    initial_draft: Option<Draft>,
+    initial_rest: Option<Rest>,
     on_finished: EventHandler<Finished>,
 ) -> Element {
     let mut active = use_signal(|| initial);
     let errors = use_errors();
+    let outbox = use_outbox();
     let unit = use_unit();
     let navigator = use_navigator();
-    let mut busy = use_signal(|| false);
-    // The set being saved, frozen until the server answers for good.
-    let mut pending = use_signal(|| None::<LoggedSet<Timestamp>>);
-    // The banner that reported the failed save, cleared once a retry succeeds.
-    let mut failed_banner = use_signal(|| None::<u64>);
-    // The finish being sent, resent unchanged after a failure.
-    let mut finishing = use_signal(|| None::<(SessionOutcome, Timestamp)>);
     let mut ask = use_signal(|| None::<Ask>);
-    // The lifter's changes to the current set. Tagged with their step, so a new step starts from
-    // its own prefill.
-    let mut edit = use_signal(|| None::<Edit>);
+    // The values being entered on the current set, saved with the record.
+    let mut edit = use_signal(|| initial_draft);
     // The rest after the last set, resumed after a reload.
-    let mut rest = use_signal(|| {
-        let state = active.peek();
-        rest::restore(state.plan.session.id, &state.sets, platform::now())
-    });
+    let mut rest = use_signal(|| rest::resume(initial_rest, &active.peek().sets, platform::now()));
+    // Set once the workout is finished or discarded: the record then belongs to the finish.
+    let mut ended = use_signal(|| false);
+    // When Done last logged a set: a double tap logs one.
+    let mut last_done = use_signal(|| None::<Timestamp>);
+    // Whether "not saved on this device" was already said.
+    let mut storage_warned = use_signal(|| false);
     // The screen stays on for the whole workout.
     use_hook(|| Rc::new(platform::ScreenAwake::keep()));
     // Any tap, or the page coming back, resumes a suspended or interrupted audio context.
     use_hook(|| Rc::new(platform::KeepAudioReady::new()));
 
+    // Saves the record after every change: the sets, skips, the values being entered, the rest.
+    use_effect(move || {
+        let record = local::record(&active.read(), edit(), rest());
+        if *ended.peek() {
+            return;
+        }
+        let Some(user) = outbox.user() else {
+            return;
+        };
+        if let Err(error) = local::save(user, &record)
+            && !*storage_warned.peek()
+        {
+            storage_warned.set(true);
+            errors.show(
+                BannerKind::Warning,
+                format!("Not saved on this device: {}", error.0),
+            );
+        }
+    });
+
+    let queued = outbox.queued();
     let state = active.read();
     let plan = &state.plan;
     let session_id = plan.session.id;
@@ -75,51 +96,40 @@ pub fn Workout(
     let steps = flow::steps(plan, state.settings.bar_weight);
     let current = flow::current_step(&steps, plan, &state.sets, &state.skipped);
     let remaining = flow::remaining(&steps, plan, &state.sets, &state.skipped);
+    let unsaved = flow::unsaved_line(plan.session.id, &state.sets, &queued);
 
+    // Queues the finish (after every set, in order), marks the record, and moves on: the summary
+    // waits for the finish to be delivered.
     let mut finish = move |outcome: SessionOutcome| {
-        // A set waiting for "Retry save" would be lost: it must be saved first.
-        if *busy.peek() || pending.peek().is_some() {
+        if *ended.peek() {
             return;
         }
-        let (outcome, at) = match *finishing.peek() {
-            Some((sent, at)) if sent == outcome => (sent, at),
-            _ => (
+        let at = flow::finish_time(platform::now(), started_at, &active.peek().sets);
+        if writes::finish_session(outbox, session_id, outcome, at).is_err() {
+            errors.show(BannerKind::Error, NOT_SIGNED_IN);
+            return;
+        }
+        ended.set(true);
+        if let Some(user) = outbox.user() {
+            let mut record = local::record(&active.peek(), None, None);
+            record.finished = Some(LocalFinish {
                 outcome,
-                flow::finish_time(platform::now(), started_at, &active.peek().sets),
-            ),
-        };
-        finishing.set(Some((outcome, at)));
-        busy.set(true);
-        spawn(async move {
-            let result = writes::finish_session(session_id, outcome, at).await;
-            busy.set(false);
-            match result {
-                Ok(summary) => {
-                    forget(session_id);
-                    if outcome == SessionOutcome::Abandoned {
-                        note(errors, "Workout discarded.");
-                        navigator.push(Route::Home {});
-                    } else {
-                        let state = active.peek();
-                        on_finished.call(Finished {
-                            summary,
-                            plan: state.plan.clone(),
-                            sets: state.sets.clone(),
-                        });
-                    }
-                }
-                Err(error) => {
-                    let failure = ApiFailure::classify(&error);
-                    errors.report(&error);
-                    if !failure.kind.is_retryable() {
-                        finishing.set(None);
-                    }
-                    if failure.kind == FailureKind::Conflict {
-                        on_reload.call(());
-                    }
-                }
-            }
-        });
+                finished_at: at,
+            });
+            let _ = local::save(user, &record);
+        }
+        if outcome == SessionOutcome::Abandoned {
+            note(errors, "Workout discarded.");
+            navigator.push(Route::Home {});
+        } else {
+            let state = active.peek();
+            on_finished.call(Finished {
+                plan: state.plan.clone(),
+                sets: state.sets.clone(),
+                outcome,
+                finished_at: at,
+            });
+        }
     };
 
     let current_exercise =
@@ -140,9 +150,7 @@ pub fn Workout(
                             onclick: move |_| {
                                 ask.set(None);
                                 if let Some(exercise) = current_exercise.clone() {
-                                    let mut state = active.write();
-                                    state.skipped.insert(exercise);
-                                    store_skipped(session_id, &state.skipped);
+                                    active.write().skipped.insert(exercise);
                                 }
                             },
                             "Skip exercise"
@@ -163,7 +171,6 @@ pub fn Workout(
                     div { class: "io-actions",
                         Button {
                             block: true,
-                            busy: busy(),
                             onclick: move |_| {
                                 ask.set(None);
                                 finish(SessionOutcome::Completed);
@@ -173,7 +180,6 @@ pub fn Workout(
                         Button {
                             variant: ButtonVariant::Danger,
                             block: true,
-                            busy: busy(),
                             onclick: move |_| {
                                 ask.set(None);
                                 finish(SessionOutcome::Abandoned);
@@ -193,11 +199,13 @@ pub fn Workout(
                 span { class: "io-label", "{plan.day_name.to_uppercase()} · DONE" }
                 h1 { class: "io-session-title", "All sets done" }
                 p { class: "io-muted", "Finish the workout to save it and see what changes next time." }
+                if let Some(line) = unsaved.clone() {
+                    p { class: "io-session-saving", role: "status", "{line}" }
+                }
                 div { class: "io-session-actions",
                     Button {
                         xl: true,
                         block: true,
-                        busy: busy(),
                         onclick: move |_| finish(SessionOutcome::Completed),
                         "Finish"
                     }
@@ -210,7 +218,7 @@ pub fn Workout(
         let last = state.sets.last().cloned();
         let (title, logged) = last
             .as_ref()
-            .map(|set| flow::rest_header(plan, set))
+            .map(|set| flow::rest_header(plan, set, &flow::save_state(set.id, &queued)))
             .unwrap_or_default();
         let after = last
             .and_then(|set| {
@@ -221,7 +229,6 @@ pub fn Workout(
             .unwrap_or(steps[index].exercise);
         return rsx! {
             RestScreen {
-                session: session_id,
                 rest,
                 title,
                 logged,
@@ -237,10 +244,6 @@ pub fn Workout(
     let planned = &plan.exercises[step.exercise];
     let exercise = planned.exercise.clone();
     let next = flow::next_step(&steps, index, plan, &state.sets, &state.skipped);
-    let frozen = pending
-        .read()
-        .clone()
-        .filter(|set| step.is_logged_by(&exercise.id, set));
     let header = flow::header_label(&plan.day_name, &step);
     let tag = flow::superset_tag(plan, step.exercise);
     let target = flow::target_line(&step, &exercise, unit);
@@ -248,68 +251,46 @@ pub fn Workout(
     let needs_training_max = matches!(planned.targets, NextTargets::NeedsTrainingMax { .. });
     let prefill = flow::prefill(&steps, &step, &exercise.id, &state.sets);
     let weight_step = state.settings.weight_step(unit);
-    let current_edit = edit().filter(|edit| edit.step == step).unwrap_or(Edit {
+    let current_edit = edit().filter(|edit| edit.step == step).unwrap_or(Draft {
         step,
         reps: i64::from(prefill.reps.get()),
         weight: prefill.weight,
         started: None,
     });
     let on_done = move |entry: Entry| {
-        // Inside the tap, before any await: lets iOS play the rest timer's beeps later.
+        // Inside the tap: lets iOS play the rest timer's beeps later.
         platform::unlock_audio();
-        if *busy.peek() {
+        if *ended.peek() {
             return;
         }
-        let set = pending.peek().clone().unwrap_or_else(|| {
-            flow::logged_set(
-                SetId::new_v7(),
-                &step,
-                &exercise_of(&active.peek(), step.exercise),
-                entry,
-                platform::now(),
-                started_at,
-            )
-        });
-        pending.set(Some(set.clone()));
-        busy.set(true);
-        spawn(async move {
-            let result = writes::save_set(session_id, set.clone()).await;
-            busy.set(false);
-            match result {
-                Ok(()) => {
-                    pending.set(None);
-                    let after = set.id;
-                    active.write().sets.push(set);
-                    if let Some(length) = rest_length(&active.peek(), step) {
-                        let started = Rest::start(after, platform::now(), length);
-                        rest::store(session_id, &started);
-                        rest.set(Some(started));
-                    }
-                    if let Some(id) = failed_banner.take() {
-                        // The failure it reported is over (unless a newer banner replaced it).
-                        errors.dismiss_if(id);
-                    }
-                }
-                Err(error) => {
-                    let failure = ApiFailure::classify(&error);
-                    errors.report(&error);
-                    failed_banner.set(errors.banner().map(|banner| banner.id));
-                    match failure.kind {
-                        // Refused for good: let the lifter change it and send a new set.
-                        FailureKind::Invalid | FailureKind::NotFound | FailureKind::Forbidden => {
-                            pending.set(None);
-                        }
-                        // The session changed elsewhere (ended, or this set id was used).
-                        FailureKind::Conflict => {
-                            pending.set(None);
-                            on_reload.call(());
-                        }
-                        // It may have been saved: resend the same set.
-                        _ => {}
-                    }
-                }
-            }
-        });
+        let now = platform::now();
+        let current = {
+            let state = active.peek();
+            let steps = flow::steps(&state.plan, state.settings.bar_weight);
+            flow::current_step(&steps, &state.plan, &state.sets, &state.skipped)
+                .map(|index| steps[index])
+        };
+        if !flow::accepts_done(&step, current.as_ref(), *last_done.peek(), now) {
+            return;
+        }
+        last_done.set(Some(now));
+        let set = flow::logged_set(
+            SetId::new_v7(),
+            &step,
+            &exercise_of(&active.peek(), step.exercise),
+            entry,
+            now,
+            started_at,
+        );
+        if writes::save_set(outbox, session_id, set.clone()).is_err() {
+            errors.show(BannerKind::Error, NOT_SIGNED_IN);
+            return;
+        }
+        let after = set.id;
+        active.write().sets.push(set);
+        edit.set(None);
+        let length = rest_length(&active.peek(), step);
+        rest.set(length.map(|length| Rest::start(after, platform::now(), length)));
     };
     rsx! {
         SetCard {
@@ -321,25 +302,15 @@ pub fn Workout(
             next,
             needs_training_max,
             weight_step,
-            frozen,
+            unsaved,
             edit: current_edit,
             on_edit: move |changed| edit.set(Some(changed)),
-            busy: busy(),
             on_done,
             on_skip: move |()| ask.set(Some(Ask::Skip)),
             on_finish: move |()| ask.set(Some(Ask::Finish)),
         }
         {sheet}
     }
-}
-
-/// What the lifter set on the current step: the steppers, and when its timer started.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Edit {
-    step: Step,
-    reps: i64,
-    weight: Option<Weight>,
-    started: Option<Timestamp>,
 }
 
 /// The rest after `done`, just logged, given the sets left (see [`flow::rest_after`]).
@@ -372,25 +343,20 @@ fn SetCard(
     next: String,
     needs_training_max: bool,
     weight_step: Weight,
-    /// The set whose save failed, shown as it was sent.
-    frozen: Option<LoggedSet<Timestamp>>,
-    edit: Edit,
-    on_edit: EventHandler<Edit>,
-    busy: bool,
+    /// Which logged sets are still saving, or were refused.
+    unsaved: Option<String>,
+    edit: Draft,
+    on_edit: EventHandler<Draft>,
     on_done: EventHandler<Entry>,
     on_skip: EventHandler<()>,
     on_finish: EventHandler<()>,
 ) -> Element {
     let mut plates = use_signal(|| false);
 
-    let locked = frozen.is_some();
-    let shown_reps = frozen
-        .as_ref()
-        .map_or(edit.reps, |set| i64::from(set.reps.get()));
-    let shown_weight = frozen.as_ref().map_or(edit.weight, |set| set.weight);
+    let shown_reps = edit.reps;
+    let shown_weight = edit.weight;
     let goal = step.target.goal;
     let timed = !matches!(goal, SetGoal::Reps { .. });
-    let done_label = if locked { "Retry save" } else { "Done" };
 
     let done = move |_| {
         let entry = Entry {
@@ -435,8 +401,7 @@ fn SetCard(
                     TimedPanel {
                         goal,
                         started: edit.started,
-                        locked: locked || busy,
-                        on_start: move |()| on_edit.call(Edit { started: Some(platform::now()), ..edit }),
+                        on_start: move |()| on_edit.call(Draft { started: Some(platform::now()), ..edit }),
                     }
                 } else {
                     Stepper {
@@ -445,30 +410,26 @@ fn SetCard(
                         max: i64::from(u16::MAX),
                         less_label: "One rep less",
                         more_label: "One rep more",
-                        disabled: locked,
-                        on_change: move |value| on_edit.call(Edit { reps: value, ..edit }),
+                        on_change: move |value| on_edit.call(Draft { reps: value, ..edit }),
                     }
                 }
                 if let Some(value) = shown_weight {
                     WeightStepper {
                         value,
                         step: weight_step,
-                        disabled: locked,
-                        on_change: move |value| on_edit.call(Edit { weight: Some(value), ..edit }),
+                        on_change: move |value| on_edit.call(Draft { weight: Some(value), ..edit }),
                     }
                 }
             }
             div { class: "io-session-actions",
-                Button { xl: true, block: true, busy, onclick: done, "{done_label}" }
+                Button { xl: true, block: true, onclick: done, "Done" }
                 p { class: "io-session-next", "{next}" }
-                div { class: "io-session-more",
-                    Button { variant: ButtonVariant::Ghost, disabled: locked || busy, onclick: move |_| on_skip.call(()), "Skip exercise" }
-                    Button { variant: ButtonVariant::Ghost, disabled: locked || busy, onclick: move |_| on_finish.call(()), "Finish workout" }
+                if let Some(line) = unsaved {
+                    p { class: "io-session-saving", role: "status", "{line}" }
                 }
-                if locked {
-                    p { class: "io-session-next", role: "status",
-                        "This set isn't saved yet: retry the save before finishing, or it would be lost."
-                    }
+                div { class: "io-session-more",
+                    Button { variant: ButtonVariant::Ghost, onclick: move |_| on_skip.call(()), "Skip exercise" }
+                    Button { variant: ButtonVariant::Ghost, onclick: move |_| on_finish.call(()), "Finish workout" }
                 }
             }
         }
@@ -516,12 +477,7 @@ fn ExerciseNotes(exercise: Exercise, warm_up: bool) -> Element {
 
 /// The timer of a hold or of intervals: started by the lifter, derived from its start time.
 #[component]
-fn TimedPanel(
-    goal: SetGoal,
-    started: Option<Timestamp>,
-    locked: bool,
-    on_start: EventHandler<()>,
-) -> Element {
+fn TimedPanel(goal: SetGoal, started: Option<Timestamp>, on_start: EventHandler<()>) -> Element {
     match started {
         None => {
             let (label, time) = match goal {
@@ -538,7 +494,6 @@ fn TimedPanel(
                     Button {
                         variant: ButtonVariant::Secondary,
                         block: true,
-                        disabled: locked,
                         onclick: move |_| on_start.call(()),
                         "Start timer"
                     }

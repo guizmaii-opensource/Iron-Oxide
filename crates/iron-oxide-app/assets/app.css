@@ -258,18 +258,103 @@ p {
 
 .io-topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   min-height: var(--io-tap-small);
 }
 
 /* Room for status indicators next to the brand (offline, unsaved changes). */
 .io-topbar-status {
   display: flex;
+  justify-content: flex-end;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  max-width: 100%;
+}
+
+/* --- Unsaved indicator (#30, in the top bar's status slot) -------------------------------------- */
+
+.io-unsaved {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 4px 4px 12px;
+  border: 1px solid var(--io-line);
+  border-radius: 999px;
+  background: var(--io-chip);
+  color: var(--io-text);
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.io-unsaved--failed {
+  border-color: var(--io-accent-text);
+  border-radius: var(--io-radius-control);
+}
+
+.io-unsaved__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--io-accent);
+}
+
+.io-unsaved--failed .io-unsaved__dot {
+  background: var(--io-accent-text);
+}
+
+.io-unsaved__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.io-unsaved__title {
+  font-family: var(--io-font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.io-unsaved__detail {
+  font-size: 13px;
+  color: var(--io-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Small header buttons: 44 px is the floor for those. */
+.io-unsaved__button {
+  flex: none;
+  min-width: var(--io-tap-small);
+  min-height: var(--io-tap-small);
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--io-raised);
+  color: var(--io-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .io-unsaved:not(.io-unsaved--failed) .io-unsaved__dot {
+    animation: io-unsaved-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes io-unsaved-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .io-page {
@@ -1558,6 +1643,18 @@ a.io-chip {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* Sets still saving, or refused: under Done. */
+.io-session-saving {
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--io-accent-text);
+}
+
+.io-summary-waiting {
+  color: var(--io-muted);
 }
 
 .io-session-next {

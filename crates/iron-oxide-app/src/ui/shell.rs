@@ -199,7 +199,9 @@ fn TopBar() -> Element {
     rsx! {
         header { class: "io-topbar",
             span { class: "io-label", "Iron Oxide" }
-            div { id: "io-status", class: "io-topbar-status" }
+            div { id: "io-status", class: "io-topbar-status",
+                super::unsaved::Unsaved {}
+            }
         }
     }
 }

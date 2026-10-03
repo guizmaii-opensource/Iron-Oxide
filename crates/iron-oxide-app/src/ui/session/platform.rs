@@ -1,7 +1,8 @@
-//! The browser calls of the session screens: the clock and a little `localStorage`.
+//! The browser calls of the session screens: the clock, sound, vibration and the screen wake
+//! lock. (The session kept on the device is in `super::local`, through the outbox's storage.)
 //!
-//! Outside the browser (the server render, host tests) the clock is the system's and storage is
-//! absent; nothing here is called during a render, only from event handlers and client effects.
+//! Outside the browser (the server render, host tests) the clock is the system's and the rest is
+//! a no-op; nothing here is called during a render, only from event handlers and client effects.
 
 use iron_oxide_domain::time::Timestamp;
 
@@ -24,47 +25,6 @@ pub fn now() -> Timestamp {
             .map_or(0, |elapsed| elapsed.as_millis());
         Timestamp::from_epoch_millis(i64::try_from(millis).unwrap_or(i64::MAX))
     }
-}
-
-/// Reads a `localStorage` entry. `None` when absent or when storage is unavailable (private
-/// mode, blocked site data).
-#[must_use]
-pub fn load(key: &str) -> Option<String> {
-    #[cfg(feature = "web")]
-    {
-        storage()?.get_item(key).ok().flatten()
-    }
-    #[cfg(not(feature = "web"))]
-    {
-        let _ = key;
-        None
-    }
-}
-
-/// Writes a `localStorage` entry, best effort: the entries kept here are conveniences that the
-/// app can do without.
-pub fn store(key: &str, value: &str) {
-    #[cfg(feature = "web")]
-    if let Some(storage) = storage() {
-        let _ = storage.set_item(key, value);
-    }
-    #[cfg(not(feature = "web"))]
-    let _ = (key, value);
-}
-
-/// Removes a `localStorage` entry, best effort.
-pub fn remove(key: &str) {
-    #[cfg(feature = "web")]
-    if let Some(storage) = storage() {
-        let _ = storage.remove_item(key);
-    }
-    #[cfg(not(feature = "web"))]
-    let _ = key;
-}
-
-#[cfg(feature = "web")]
-fn storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok().flatten()
 }
 
 /// What the rest timer announces with a sound and a vibration.

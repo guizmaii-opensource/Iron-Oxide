@@ -234,7 +234,7 @@ and look like a conflict. The retry queue (#30) re-sends exactly the same body.
 
 | Function | Route | What it does |
 |---|---|---|
-| `start_session(session_id, started_at)` | `/api/sessions/start` | Starts a session of the active program's latest version, on the next day of its rotation. Returns a `SessionView`. |
+| `start_session(session_id, started_at, choice?)` | `/api/sessions/start` | Starts a session. With `choice` (`{program_id, program_version_id, day}`, what the device showed and started, possibly offline), the session is recorded on exactly that version and day: `409` when the version is not one of the user's or not of that program, `422` when the version has no such day; the rotation is never applied again, so a start delivered after the previous session's finish keeps its day. Without `choice` (older clients), the active program's latest version on the next day of its rotation. A retry with the same id and time returns the session it created. Returns a `SessionView`. |
 | `get_session(session_id)` | `/api/sessions/get` | One session (`SessionView`) |
 | `get_in_progress_session()` | `/api/sessions/in-progress` | The most recently started session in progress, with its sets in the order they were completed, or `null` |
 | `get_next_session_plan()` | `/api/sessions/next-plan` | Today's plan before starting: the next day of the active program (latest version) and its targets from every completed session. `409` with no active program. |

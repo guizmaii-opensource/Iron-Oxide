@@ -41,10 +41,11 @@
 //!   [`Outbox::discard_count`] gives the number for the confirmation. [`Outbox::retry_now`]
 //!   skips the backoff.
 //!
-//! The session screen keeps a [`LocalSession`] and saves it after every change
-//! (`LocalSession::save(storage, user)`, with [`platform::with_storage`]). On load it restores
-//! the session, then reconciles with `get_in_progress_session`. It clears the session once the
-//! finish is enqueued. Signing out clears it as well ([`Outbox::signed_out`]).
+//! The session screen (`crate::ui::session::local`) keeps a [`LocalSession`] and saves it after
+//! every change (`LocalSession::save(storage, user)`, with [`platform::with_storage`]). On load it
+//! restores the session, then reconciles with `get_in_progress_session`. Finishing marks it
+//! `finished`; it is cleared once the finish is delivered. Signing out clears it as well
+//! ([`Outbox::signed_out`]).
 //!
 //! # Delivery
 //!

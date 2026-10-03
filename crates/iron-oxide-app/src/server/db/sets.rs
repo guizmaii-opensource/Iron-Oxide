@@ -360,7 +360,7 @@ pub async fn list_for_sessions(
     sqlx::query_as!(
         SetRow,
         "SELECT id, session_id, exercise_id, set_index, reps, weight_ng, duration_s, warmup,
-                completed_at
+                completed_at, target_weight_ng, target_goal
          FROM workout_sets WHERE user_id = $1 AND session_id = ANY($2)
          ORDER BY completed_at, id",
         user.as_uuid(),

@@ -91,6 +91,5 @@ pub fn App() -> Element {
         document::Stylesheet { href: theme::APP_CSS }
         Router::<Route> {}
         BannerHost {}
-        unsaved::Unsaved {}
     }
 }

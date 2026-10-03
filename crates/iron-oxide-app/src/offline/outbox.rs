@@ -175,6 +175,33 @@ impl Outbox {
         })
     }
 
+    /// The queued writes, oldest first, each with the server's refusal when it was rejected
+    /// (reactive). Reads the stored queue once, for screens that show several writes' state.
+    #[must_use]
+    pub fn queued(&self) -> Vec<(WriteKey, Option<String>)> {
+        if self.status.read().pending_count == 0 {
+            return Vec::new();
+        }
+        let mut store = self.store;
+        let mut store = store.write();
+        store.as_mut().map_or_else(Vec::new, |store| {
+            platform::with_storage(|storage| {
+                store
+                    .load(storage)
+                    .entries()
+                    .map(|entry| (entry.write.key(), entry.failed.clone()))
+                    .collect()
+            })
+        })
+    }
+
+    /// The user whose writes this outbox holds (reactive): `None` while signed out, and until
+    /// the app has read the remembered user after its first render.
+    #[must_use]
+    pub fn user(&self) -> Option<UserId> {
+        *self.user.read()
+    }
+
     /// Tries again now, skipping the backoff (never a `429`'s delay).
     pub fn retry_now(&self) {
         self.commands.send(Command::Nudge);
@@ -390,7 +417,10 @@ async fn call(write: Write) -> Result<(), ServerFnError> {
         Write::StartSession {
             session_id,
             started_at,
-        } => start_session(session_id, started_at).await.map(drop),
+            choice,
+        } => start_session(session_id, started_at, choice)
+            .await
+            .map(drop),
         Write::SaveSet { session_id, set } => save_set(session_id, set).await,
         Write::FinishSession {
             session_id,

@@ -1,13 +1,11 @@
-//! The "unsaved" indicator (#30): a small pill, shown only while the outbox holds writes the
-//! server has not confirmed, or something went wrong. Hidden otherwise.
+//! The "unsaved" indicator (#30): a small pill in the top bar's status slot (`#io-status`), shown
+//! only while the outbox holds writes the server has not confirmed, or something went wrong.
+//! Hidden otherwise. Styled by `assets/app.css` (`.io-unsaved`), on the theme's tokens.
 
 use dioxus::prelude::*;
 
 use crate::auth::browser;
 use crate::offline::{OutboxStatus, use_outbox};
-
-/// Its styles: Forge tokens (#26) with literal fallbacks, until the theme stylesheet takes them.
-const UNSAVED_CSS: Asset = asset!("/assets/unsaved.css");
 
 /// Asked before giving up the refused writes and those that depend on them (a refused start
 /// takes its session's sets and finish): they are lost for good, so it says how many.
@@ -53,19 +51,16 @@ fn label(status: &OutboxStatus) -> Option<Label> {
     })
 }
 
-/// The indicator. Needs [`crate::offline::use_outbox_provider`] above it.
+/// The indicator, rendered by the shell's top bar. Needs [`crate::offline::use_outbox_provider`]
+/// above it.
 #[component]
 pub fn Unsaved() -> Element {
     let outbox = use_outbox();
-    // Always linked, so the styles are already loaded when the pill appears offline.
     let Some(label) = label(&outbox.status()) else {
-        return rsx! {
-            document::Stylesheet { href: UNSAVED_CSS }
-        };
+        return rsx! {};
     };
     let role = if label.failed { "alert" } else { "status" };
     rsx! {
-        document::Stylesheet { href: UNSAVED_CSS }
         div {
             class: if label.failed { "io-unsaved io-unsaved--failed" } else { "io-unsaved" },
             role,

@@ -20,13 +20,16 @@ use iron_oxide_domain::program::{Exercise, Work};
 use iron_oxide_domain::progression::{NextTargets, SetGoal, SetTarget};
 use iron_oxide_domain::time::Timestamp;
 use iron_oxide_domain::timer::IntervalPlan;
-use iron_oxide_domain::{ExerciseId, LoggedSet, Reps, Seconds, SetId, Unit, Weight};
+use iron_oxide_domain::{ExerciseId, LoggedSet, Reps, Seconds, SessionId, SetId, Unit, Weight};
+
+use serde::{Deserialize, Serialize};
 
 use crate::api::sessions::{PlannedExercise, SessionPlan};
+use crate::offline::WriteKey;
 use crate::ui::weight::weight_text;
 
 /// One set of the day, in the order it is done.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     /// The exercise's position in the plan.
     pub exercise: usize,
@@ -417,7 +420,11 @@ fn group_of(plan: &SessionPlan, exercise: usize) -> std::ops::Range<usize> {
 
 /// The rest screen's header: `REST · BACK SQUAT` and `Set 2 logged ✓` for the set it follows.
 #[must_use]
-pub fn rest_header(plan: &SessionPlan, set: &LoggedSet<Timestamp>) -> (String, String) {
+pub fn rest_header(
+    plan: &SessionPlan,
+    set: &LoggedSet<Timestamp>,
+    state: &SaveState,
+) -> (String, String) {
     let name = plan
         .exercises
         .iter()
@@ -427,10 +434,103 @@ pub fn rest_header(plan: &SessionPlan, set: &LoggedSet<Timestamp>) -> (String, S
             |planned| planned.exercise.name.clone(),
         );
     let kind = if set.warm_up { "Warm-up" } else { "Set" };
+    let done = match state {
+        SaveState::Saved => "logged ✓",
+        SaveState::Saving => "saving…",
+        SaveState::NotSaved(_) => "not saved",
+    };
     (
         format!("REST · {}", name.to_uppercase()),
-        format!("{kind} {} logged ✓", set.set_index + 1),
+        format!("{kind} {} {done}", set.set_index + 1),
     )
+}
+
+/// The server's refusal of the session's start, if it refused it.
+#[must_use]
+pub fn start_refused(session: SessionId, queued: &[(WriteKey, Option<String>)]) -> Option<String> {
+    queued
+        .iter()
+        .find(|(key, _)| *key == WriteKey::StartSession(session))
+        .and_then(|(_, refusal)| refusal.clone())
+}
+
+/// The least time between two Done taps that both count, in milliseconds: a finger's double tap
+/// lands 40 to 300 ms apart.
+pub const DONE_DEBOUNCE_MS: i64 = 500;
+
+/// Whether a Done tap on `tapped` logs a set: only while `tapped` is still the current step (a
+/// second tap in the same tick finds it logged), and not within [`DONE_DEBOUNCE_MS`] of the
+/// previous Done (a double tap would otherwise log the next step too). A clock that stepped back
+/// does not block Done.
+#[must_use]
+pub fn accepts_done(
+    tapped: &Step,
+    current: Option<&Step>,
+    last_done: Option<Timestamp>,
+    now: Timestamp,
+) -> bool {
+    let too_soon = last_done.is_some_and(|last| {
+        (0..DONE_DEBOUNCE_MS).contains(&now.epoch_millis().saturating_sub(last.epoch_millis()))
+    });
+    current == Some(tapped) && !too_soon
+}
+
+/// Where a logged set stands with the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveState {
+    /// Delivered.
+    Saved,
+    /// Queued, on its way.
+    Saving,
+    /// Refused by the server: its message.
+    NotSaved(String),
+}
+
+/// The state of the set `id`, from the outbox's queued writes.
+#[must_use]
+pub fn save_state(id: SetId, queued: &[(WriteKey, Option<String>)]) -> SaveState {
+    match queued.iter().find(|(key, _)| *key == WriteKey::SaveSet(id)) {
+        None => SaveState::Saved,
+        Some((_, None)) => SaveState::Saving,
+        Some((_, Some(message))) => SaveState::NotSaved(message.clone()),
+    }
+}
+
+/// The line the set screen shows while the session or some of `sets` are not delivered:
+/// `Not saved: <message>` when the server refused the session's start (its sets wait behind it),
+/// `1 set not saved: <message>` once a set was refused, else `2 sets saving…`. `None` when all
+/// are saved.
+#[must_use]
+pub fn unsaved_line(
+    session: SessionId,
+    sets: &[LoggedSet<Timestamp>],
+    queued: &[(WriteKey, Option<String>)],
+) -> Option<String> {
+    if let Some(message) = start_refused(session, queued) {
+        return Some(format!("Not saved: {message}"));
+    }
+    let states: Vec<_> = sets.iter().map(|set| save_state(set.id, queued)).collect();
+    let refused: Vec<_> = states
+        .iter()
+        .filter_map(|state| match state {
+            SaveState::NotSaved(message) => Some(message),
+            _ => None,
+        })
+        .collect();
+    if let Some(first) = refused.first() {
+        let count = u32::try_from(refused.len()).unwrap_or(u32::MAX);
+        return Some(format!("{} not saved: {first}", plural(count, "set")));
+    }
+    let saving = states
+        .iter()
+        .filter(|state| **state == SaveState::Saving)
+        .count();
+    (saving > 0).then(|| {
+        format!(
+            "{} saving…",
+            plural(u32::try_from(saving).unwrap_or(u32::MAX), "set")
+        )
+    })
 }
 
 /// The "up next" card of the rest screen: `UP NEXT · SET 3 / 5` and `5 × 100 kg`. The exercise
@@ -1302,6 +1402,113 @@ mod tests {
         );
     }
 
+    /// Review of #113: a double tap on Done logs one set, in one tick or 40 ms apart.
+    #[test]
+    fn done_counts_once_per_tap_and_not_twice_on_a_double_tap() {
+        let plan = plan(vec![planned("squat", 2, 3, None)]);
+        let steps = steps(&plan, kg(20.0));
+        let at = Timestamp::from_epoch_millis;
+        // The first tap on warm-up 1.
+        assert!(accepts_done(&steps[0], Some(&steps[0]), None, at(10_000)));
+        // The second tap of the same tick: warm-up 1 is logged, the current step moved on.
+        assert!(!accepts_done(
+            &steps[0],
+            Some(&steps[1]),
+            Some(at(10_000)),
+            at(10_000)
+        ));
+        // 40 ms later, on the next step's Done (warm-ups have no rest screen in between).
+        assert!(!accepts_done(
+            &steps[1],
+            Some(&steps[1]),
+            Some(at(10_000)),
+            at(10_040)
+        ));
+        assert!(!accepts_done(
+            &steps[1],
+            Some(&steps[1]),
+            Some(at(10_000)),
+            at(10_499)
+        ));
+        // A real next tap.
+        assert!(accepts_done(
+            &steps[1],
+            Some(&steps[1]),
+            Some(at(10_000)),
+            at(10_500)
+        ));
+        // The day is over: nothing to log.
+        assert!(!accepts_done(&steps[1], None, None, at(20_000)));
+        // A clock that stepped back does not block Done.
+        assert!(accepts_done(
+            &steps[1],
+            Some(&steps[1]),
+            Some(at(10_000)),
+            at(9_000)
+        ));
+    }
+
+    #[test]
+    fn a_refused_start_is_shown_instead_of_saving() {
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let sets = vec![logged("squat", false, 0, 100.0, 2_000)];
+        let queued = vec![
+            (
+                WriteKey::StartSession(session),
+                Some("Another session is in progress.".to_owned()),
+            ),
+            (WriteKey::SaveSet(sets[0].id), None),
+        ];
+        assert_eq!(
+            unsaved_line(session, &sets, &queued).as_deref(),
+            Some("Not saved: Another session is in progress.")
+        );
+        assert_eq!(
+            start_refused(session, &queued).as_deref(),
+            Some("Another session is in progress.")
+        );
+        let pending = vec![(WriteKey::StartSession(session), None)];
+        assert_eq!(start_refused(session, &pending), None);
+    }
+
+    #[test]
+    fn a_set_shows_saving_until_delivered_and_not_saved_when_refused() {
+        let sets = vec![
+            logged("squat", false, 0, 100.0, 2_000),
+            logged("squat", false, 1, 100.0, 3_000),
+        ];
+        let (first, second) = (sets[0].id, sets[1].id);
+        assert_eq!(save_state(first, &[]), SaveState::Saved);
+        assert_eq!(
+            unsaved_line(SessionId::from_uuid(Uuid::from_u128(1)), &sets, &[]),
+            None
+        );
+        let queued = vec![
+            (WriteKey::SaveSet(first), None),
+            (WriteKey::SaveSet(second), None),
+        ];
+        assert_eq!(save_state(first, &queued), SaveState::Saving);
+        assert_eq!(
+            unsaved_line(SessionId::from_uuid(Uuid::from_u128(1)), &sets, &queued).as_deref(),
+            Some("2 sets saving…")
+        );
+        let refused = vec![
+            (
+                WriteKey::SaveSet(first),
+                Some("This session has already ended.".to_owned()),
+            ),
+            (WriteKey::SaveSet(second), None),
+        ];
+        assert_eq!(
+            save_state(first, &refused),
+            SaveState::NotSaved("This session has already ended.".to_owned())
+        );
+        assert_eq!(
+            unsaved_line(SessionId::from_uuid(Uuid::from_u128(1)), &sets, &refused).as_deref(),
+            Some("1 set not saved: This session has already ended.")
+        );
+    }
+
     #[test]
     fn the_rest_screen_reads_like_the_board() {
         let plan = plan(vec![
@@ -1311,8 +1518,16 @@ mod tests {
         let steps = steps(&plan, kg(20.0));
         let set = logged("back-squat", false, 1, 100.0, 2_000);
         assert_eq!(
-            rest_header(&plan, &set),
+            rest_header(&plan, &set, &SaveState::Saved),
             ("REST · BACK SQUAT".to_owned(), "Set 2 logged ✓".to_owned())
+        );
+        assert_eq!(
+            rest_header(&plan, &set, &SaveState::Saving).1,
+            "Set 2 saving…"
+        );
+        assert_eq!(
+            rest_header(&plan, &set, &SaveState::NotSaved("No.".to_owned())).1,
+            "Set 2 not saved"
         );
         assert_eq!(
             up_next(&steps, 2, 0, &plan, Unit::Kg),

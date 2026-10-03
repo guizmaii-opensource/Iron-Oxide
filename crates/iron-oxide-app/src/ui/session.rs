@@ -2,18 +2,20 @@
 //! see its summary.
 //!
 //! - `flow`: the pure view model (order of the sets, prefill, labels), unit-tested.
-//! - `writes`: every session write (start, save a set, finish), in one file so the offline outbox
-//!   (#30) can take them over.
+//! - `writes`: every session write (start, save a set, finish), queued in the offline outbox (#107).
+//! - `local`: the session in progress kept on the device, and how it is reconciled on load.
 //! - `workout`: the active session screen.
 //! - `rest`: the rest timer between sets (#29).
 //! - `summary`: the end-of-session summary (#32).
-//! - `platform`: the browser clock, `localStorage`, sound, vibration and the screen wake lock.
+//! - `platform`: the browser clock, sound, vibration and the screen wake lock.
 //!
 //! The page loads on the client only (like the shell's sign-in check), so the server render shows
-//! the loading state and hydration matches. An in-progress session is resumed from the server: its
-//! plan and the sets already saved, so a reload continues at the next set.
+//! the loading state and hydration matches. It waits until the outbox knows the user, then
+//! restores the session kept on the device (offline too) or loads it from the server, see
+//! [`local::reconcile`].
 
 mod flow;
+pub(crate) mod local;
 pub(crate) mod platform;
 mod rest;
 mod summary;
@@ -24,29 +26,39 @@ use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
 use iron_oxide_domain::time::Timestamp;
-use iron_oxide_domain::{ExerciseId, LoggedSet, SessionId};
+use iron_oxide_domain::{ExerciseId, LoggedSet};
 
 use crate::api::error::{ApiFailure, FailureKind};
 use crate::api::sessions::{
-    NextSessionPlan, SessionPlan, get_in_progress_session, get_next_session_plan, get_session_plan,
+    NextSessionPlan, SessionPlan, SessionWithSets, get_in_progress_session, get_next_session_plan,
+    get_session_plan,
 };
 use crate::api::settings::{Settings, get_settings};
+use crate::auth::api::me;
+use crate::offline::{Outbox, use_outbox};
 use crate::ui::components::{Button, Card, EmptyState, LoadingState};
 use crate::ui::errors::{BannerKind, Errors, use_errors};
 use crate::ui::shell::Route;
 use crate::ui::weight::{UnitSetting, use_unit};
+use local::{Draft, Restore};
+use rest::Rest;
 use summary::{Finished, SummaryScreen};
 use workout::Workout;
+
+/// Shown when a write cannot be queued because nobody is signed in on this device.
+pub const NOT_SIGNED_IN: &str = "Sign in again to save this workout.";
 
 /// A session in progress, as the screen works on it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Active {
     pub plan: SessionPlan,
     pub settings: Settings,
-    /// The sets saved so far, in logging order.
+    /// The sets logged so far, in logging order (queued or delivered).
     pub sets: Vec<LoggedSet<Timestamp>>,
     /// The exercises skipped on this device.
     pub skipped: BTreeSet<ExerciseId>,
+    /// The program's name, when known (for Home's Resume card).
+    pub program_name: Option<String>,
 }
 
 /// What the page shows.
@@ -59,8 +71,9 @@ enum Page {
     Start(Box<NextSessionPlan>, Box<Settings>),
     /// No session can start (no active program): the server's message.
     Blocked(String),
-    Active(Box<Active>),
-    /// The workout just finished: its summary.
+    /// The session in progress, with the values being entered and the rest kept with it.
+    Active(Box<Active>, Option<Draft>, Option<Rest>),
+    /// The workout just ended: its summary, once its finish is delivered.
     Summary(Box<Finished>),
 }
 
@@ -70,11 +83,30 @@ pub fn SessionPage() -> Element {
     let page = use_signal(|| Page::Loading);
     let errors = use_errors();
     let unit = use_context::<UnitSetting>();
+    let outbox = use_outbox();
+    let mut loaded = use_signal(|| false);
+    let mut asked_who = use_signal(|| false);
 
+    // Client only, once the outbox knows whose writes it holds (it reads the remembered user
+    // after its first render): only then is an empty queue "delivered" rather than "not loaded".
     use_effect(move || {
-        if cfg!(feature = "web") {
-            spawn(load(page, errors, unit));
+        if !cfg!(feature = "web") || *loaded.peek() {
+            return;
         }
+        if outbox.user().is_none() {
+            // Signed in before the outbox remembered users: ask the server once who it is.
+            if !*asked_who.peek() {
+                asked_who.set(true);
+                spawn(async move {
+                    if let Ok(me) = me().await {
+                        outbox.signed_in(me.user_id);
+                    }
+                });
+            }
+            return;
+        }
+        loaded.set(true);
+        spawn(load(page, errors, unit, outbox));
     });
 
     let current = page.read().clone();
@@ -84,7 +116,7 @@ pub fn SessionPage() -> Element {
             EmptyState {
                 title: "Workout not loaded",
                 message: "Check your connection and try again.",
-                Button { onclick: move |_| { spawn(load(page, errors, unit)); }, "Try again" }
+                Button { onclick: move |_| { spawn(load(page, errors, unit, outbox)); }, "Try again" }
             }
         },
         Page::Blocked(message) => rsx! {
@@ -98,16 +130,16 @@ pub fn SessionPage() -> Element {
                 settings: *settings,
                 on_started: move |active: Active| {
                     let mut page = page;
-                    page.set(Page::Active(Box::new(active)));
+                    page.set(Page::Active(Box::new(active), None, None));
                 },
-                on_reload: move |()| { spawn(load(page, errors, unit)); },
             }
         },
-        Page::Active(active) => rsx! {
+        Page::Active(active, draft, rest) => rsx! {
             Workout {
                 key: "{active.plan.session.id}",
                 initial: *active,
-                on_reload: move |()| { spawn(load(page, errors, unit)); },
+                initial_draft: draft,
+                initial_rest: rest,
                 on_finished: move |finished: Finished| {
                     let mut page = page;
                     page.set(Page::Summary(Box::new(finished)));
@@ -115,43 +147,97 @@ pub fn SessionPage() -> Element {
             }
         },
         Page::Summary(finished) => rsx! {
-            SummaryScreen { finished: *finished }
+            SummaryScreen { key: "{finished.plan.session.id}", finished: *finished }
         },
     }
 }
 
-/// Loads the settings, then the session in progress (with its plan) or the next one.
-async fn load(mut page: Signal<Page>, errors: Errors, mut unit: UnitSetting) {
+/// Restores the session kept on the device, or loads the session in progress (or the next one)
+/// from the server. Offline, the record is enough.
+async fn load(mut page: Signal<Page>, errors: Errors, unit: UnitSetting, outbox: Outbox) {
     page.set(Page::Loading);
+    let Some(user) = outbox.user() else {
+        page.set(Page::Failed);
+        return;
+    };
+    let record = local::load(user);
+    // Only worth asking when there is something to reconcile: offline it fails fast.
+    let server = get_in_progress_session().await;
+    let queued = outbox.queued();
+    let decision = local::reconcile(record, server.as_ref().ok().map(Option::as_ref), &queued);
+    let next = match decision {
+        Restore::Resume(record) => match local::active_of(&record) {
+            Some((active, draft, rest)) => {
+                show_unit(unit, &active.settings);
+                // Keep what the server added (sets logged elsewhere).
+                let _ = local::save(user, &record);
+                Page::Active(Box::new(active), draft, rest)
+            }
+            None => from_server(server, errors, unit, outbox).await,
+        },
+        Restore::Ended(record) => match (local::screen_of(&record), record.finished) {
+            (Some(screen), Some(finish)) => Page::Summary(Box::new(Finished {
+                plan: screen.plan,
+                sets: record.sets,
+                outcome: finish.outcome,
+                finished_at: finish.finished_at,
+            })),
+            _ => from_server(server, errors, unit, outbox).await,
+        },
+        Restore::Drop => {
+            local::clear(user);
+            from_server(server, errors, unit, outbox).await
+        }
+        Restore::Server => from_server(server, errors, unit, outbox).await,
+    };
+    page.set(next);
+}
+
+/// The page from the server: the session in progress (kept on the device from now on), or the
+/// next one to start.
+async fn from_server(
+    server: Result<Option<SessionWithSets>, ServerFnError>,
+    errors: Errors,
+    unit: UnitSetting,
+    outbox: Outbox,
+) -> Page {
+    let running = match server {
+        Ok(running) => running,
+        Err(error) => {
+            errors.report(&error);
+            return Page::Failed;
+        }
+    };
     let settings = match get_settings().await {
         Ok(settings) => settings,
         Err(error) => {
             errors.report(&error);
-            page.set(Page::Failed);
-            return;
+            return Page::Failed;
         }
     };
-    // The steppers and labels show weights in the user's unit.
-    if *unit.0.peek() != settings.unit {
-        unit.0.set(settings.unit);
-    }
-    let next = match get_in_progress_session().await {
-        Ok(Some(in_progress)) => {
-            let id = in_progress.session.id;
-            match get_session_plan(id).await {
-                Ok(plan) => Page::Active(Box::new(Active {
+    show_unit(unit, &settings);
+    match running {
+        Some(running) => match get_session_plan(running.session.id).await {
+            Ok(plan) => {
+                let active = Active {
                     plan,
                     settings,
-                    sets: in_progress.sets,
-                    skipped: load_skipped(id),
-                })),
-                Err(error) => {
-                    errors.report(&error);
-                    Page::Failed
+                    sets: running.sets,
+                    skipped: BTreeSet::new(),
+                    program_name: None,
+                };
+                // From now on the device keeps it, so an offline reload still finds it.
+                if let Some(user) = outbox.user() {
+                    let _ = local::save(user, &local::record(&active, None, None));
                 }
+                Page::Active(Box::new(active), None, None)
             }
-        }
-        Ok(None) => match get_next_session_plan().await {
+            Err(error) => {
+                errors.report(&error);
+                Page::Failed
+            }
+        },
+        None => match get_next_session_plan().await {
             Ok(next) => Page::Start(Box::new(next), Box::new(settings)),
             Err(error) => {
                 let failure = ApiFailure::classify(&error);
@@ -164,37 +250,14 @@ async fn load(mut page: Signal<Page>, errors: Errors, mut unit: UnitSetting) {
                 }
             }
         },
-        Err(error) => {
-            errors.report(&error);
-            Page::Failed
-        }
-    };
-    page.set(next);
-}
-
-/// The `localStorage` key of the exercises skipped in a session.
-fn skipped_key(session: SessionId) -> String {
-    format!("io.session.{}.skipped", session.as_uuid())
-}
-
-/// The exercises skipped in `session` on this device.
-fn load_skipped(session: SessionId) -> BTreeSet<ExerciseId> {
-    platform::load(&skipped_key(session))
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default()
-}
-
-/// Remembers the exercises skipped in `session`, so a reload does not bring them back.
-fn store_skipped(session: SessionId, skipped: &BTreeSet<ExerciseId>) {
-    if let Ok(json) = serde_json::to_string(skipped) {
-        platform::store(&skipped_key(session), &json);
     }
 }
 
-/// Forgets what this device kept about `session`, once it has ended.
-fn forget(session: SessionId) {
-    platform::remove(&skipped_key(session));
-    rest::clear(session);
+/// Shows weights in the session's unit.
+fn show_unit(mut unit: UnitSetting, settings: &Settings) {
+    if *unit.0.peek() != settings.unit {
+        unit.0.set(settings.unit);
+    }
 }
 
 /// The next workout, with its exercises, and the button that starts it.
@@ -203,57 +266,22 @@ fn StartCard(
     next: NextSessionPlan,
     settings: Settings,
     on_started: EventHandler<Active>,
-    on_reload: EventHandler<()>,
 ) -> Element {
     let errors = use_errors();
     let unit = use_unit();
-    let mut busy = use_signal(|| false);
-    // A start that failed is resent with the same id and time, so it is idempotent.
-    let mut pending = use_signal(|| None::<(SessionId, Timestamp)>);
+    let outbox = use_outbox();
     let bar_weight = settings.bar_weight;
+    let next_plan = next.clone();
 
     let start = move |_| {
         // Inside the tap: lets iOS play the rest timer's beeps later.
         platform::unlock_audio();
-        if *busy.peek() {
-            return;
-        }
-        let (id, at) = pending
-            .peek()
-            .unwrap_or_else(|| (SessionId::new_v7(), platform::now()));
-        pending.set(Some((id, at)));
-        busy.set(true);
-        let settings = settings.clone();
-        spawn(async move {
-            let started = writes::start_session(id, at).await;
-            let plan = match started {
-                Ok(session) => get_session_plan(session.id).await,
-                Err(error) => Err(error),
-            };
-            busy.set(false);
-            match plan {
-                Ok(plan) => {
-                    pending.set(None);
-                    on_started.call(Active {
-                        plan,
-                        settings,
-                        sets: Vec::new(),
-                        skipped: BTreeSet::new(),
-                    });
-                }
-                Err(error) => {
-                    let failure = ApiFailure::classify(&error);
-                    errors.report(&error);
-                    if !failure.kind.is_retryable() {
-                        pending.set(None);
-                    }
-                    if failure.kind == FailureKind::Conflict {
-                        // Another session is in progress (another tab or device): resume it.
-                        on_reload.call(());
-                    }
-                }
+        match local::start(outbox, &next_plan, settings.clone(), None) {
+            Ok(active) => on_started.call(active),
+            Err(_) => {
+                errors.show(BannerKind::Error, NOT_SIGNED_IN);
             }
-        });
+        }
     };
 
     let lines: Vec<(String, String)> = next
@@ -283,7 +311,7 @@ fn StartCard(
                 }
             }
         }
-        Button { xl: true, block: true, busy: busy(), onclick: start, "Start workout" }
+        Button { xl: true, block: true, onclick: start, "Start workout" }
     }
 }
 

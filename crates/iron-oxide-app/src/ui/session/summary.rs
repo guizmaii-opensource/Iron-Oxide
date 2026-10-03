@@ -3,25 +3,156 @@
 //!
 //! Everything comes from the server's [`SessionSummary`] (computed by the domain: volume, PRs,
 //! progression changes) and the sets logged; nothing is recomputed here.
+//!
+//! The finish is queued in the offline outbox (#107): the summary waits until it is delivered,
+//! then asks for it again with the same arguments (a replay). Until then, or offline, it says the
+//! workout is saved on the device and the summary follows.
 
 use dioxus::prelude::*;
 use iron_oxide_domain::time::Timestamp;
-use iron_oxide_domain::{ExerciseId, LoggedSet, PrKind, Seconds, Unit, Volume};
+use iron_oxide_domain::{ExerciseId, LoggedSet, PrKind, Seconds, SessionOutcome, Unit, Volume};
 
-use super::flow;
+use super::{flow, local, writes};
 use crate::api::sessions::{SessionPlan, SessionSummary, get_next_session_plan};
-use crate::ui::components::{Button, Card};
+use crate::offline::{WriteKey, use_outbox};
+use crate::ui::components::{Button, Card, LoadingState};
 use crate::ui::errors::use_errors;
 use crate::ui::shell::Route;
 use crate::ui::weight::{WEIGHT_DECIMALS, use_unit, weight_text};
 
-/// A finished workout, as the summary shows it.
+/// A workout ended on this device: what the summary needs, and the finish that was queued.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Finished {
-    pub summary: SessionSummary,
     pub plan: SessionPlan,
     /// The sets logged, warm-ups included.
     pub sets: Vec<LoggedSet<Timestamp>>,
+    pub outcome: SessionOutcome,
+    pub finished_at: Timestamp,
+}
+
+/// Where the queued finish stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishState {
+    /// Delivered: the summary can be asked for.
+    Delivered,
+    /// Still queued (offline, or waiting its turn; the unsaved indicator says why).
+    Queued,
+    /// Refused by the server: its message.
+    Refused(String),
+}
+
+/// The state of the finish of `session`, from the outbox's queued writes. A refused start
+/// refuses the whole workout: its finish waits behind it.
+#[must_use]
+pub fn finish_state(
+    session: iron_oxide_domain::SessionId,
+    queued: &[(WriteKey, Option<String>)],
+) -> FinishState {
+    if let Some(message) = flow::start_refused(session, queued) {
+        return FinishState::Refused(message);
+    }
+    match queued
+        .iter()
+        .find(|(key, _)| *key == WriteKey::FinishSession(session))
+    {
+        None => FinishState::Delivered,
+        Some((_, Some(message))) => FinishState::Refused(message.clone()),
+        Some((_, None)) => FinishState::Queued,
+    }
+}
+
+/// The summary of a workout just ended: waits for its finish to be delivered, then shows it.
+#[component]
+pub fn SummaryScreen(finished: Finished) -> Element {
+    let outbox = use_outbox();
+    let errors = use_errors();
+    let navigator = use_navigator();
+    let session_id = finished.plan.session.id;
+    let (outcome, finished_at) = (finished.outcome, finished.finished_at);
+    let state = finish_state(session_id, &outbox.queued());
+    let delivered = state == FinishState::Delivered && outbox.user().is_some();
+    let mut summary = use_resource(move || async move {
+        // Reactive: runs again when the outbox delivers the finish.
+        let ready =
+            outbox.user().is_some() && !outbox.is_pending(WriteKey::FinishSession(session_id));
+        if !ready || outcome == SessionOutcome::Abandoned {
+            return None;
+        }
+        let replay = writes::finished_summary(session_id, outcome, finished_at).await;
+        match &replay {
+            Ok(_) => {
+                // Delivered and summed up: the record on the device has done its job.
+                if let Some(user) = outbox.user()
+                    && local::load(user).is_some_and(|record| record.session_id == session_id)
+                {
+                    local::clear(user);
+                }
+            }
+            Err(error) => errors.report(error),
+        }
+        Some(replay)
+    });
+
+    let home = move |_| {
+        navigator.push(Route::Home {});
+    };
+    if outcome == SessionOutcome::Abandoned {
+        let message = if delivered {
+            "The workout was discarded."
+        } else {
+            "The workout is discarded on this device; the server hears of it once you're back online."
+        };
+        return rsx! {
+            div { class: "io-session io-summary",
+                h1 { class: "io-session-title", "Discarded" }
+                p { class: "io-muted", "{message}" }
+                Button { xl: true, block: true, onclick: home, "Back to Home" }
+            }
+        };
+    }
+    let waiting = |title: &str, message: String| {
+        rsx! {
+            div { class: "io-session io-summary",
+                div { class: "io-session-heading",
+                    span { class: "io-label", "{finished.plan.day_name.to_uppercase()} · DONE" }
+                    h1 { class: "io-session-title", "{title}" }
+                }
+                p { class: "io-summary-waiting", role: "status", "{message}" }
+                Button { xl: true, block: true, onclick: home, "Back to Home" }
+            }
+        }
+    };
+    match state {
+        FinishState::Refused(message) => {
+            return waiting(
+                "Not saved",
+                format!(
+                    "The server refused this workout: {message} Retry or discard it from the banner at the top."
+                ),
+            );
+        }
+        FinishState::Queued => {
+            return waiting(
+                "Workout done",
+                "Saved on this device: the summary appears once it reaches the server.".to_owned(),
+            );
+        }
+        FinishState::Delivered => {}
+    }
+    match summary.read().clone() {
+        Some(Some(Ok(loaded))) => rsx! {
+            SummaryView { summary: loaded, plan: finished.plan, sets: finished.sets }
+        },
+        Some(Some(Err(_))) => rsx! {
+            div { class: "io-session io-summary",
+                h1 { class: "io-session-title", "Workout done" }
+                p { class: "io-muted", "It is saved, but its summary could not be loaded." }
+                Button { onclick: move |_| summary.restart(), "Try again" }
+                Button { xl: true, block: true, onclick: home, "Back to Home" }
+            }
+        },
+        _ => rsx! { LoadingState { message: "Loading the summary…" } },
+    }
 }
 
 /// How long the workout lasted: `52:10`, `1:02:05`.
@@ -98,7 +229,11 @@ pub fn record_text(kind: &PrKind, unit: Unit) -> String {
 
 /// The summary screen, with the way back to Home.
 #[component]
-pub fn SummaryScreen(finished: Finished) -> Element {
+fn SummaryView(
+    summary: SessionSummary,
+    plan: SessionPlan,
+    sets: Vec<LoggedSet<Timestamp>>,
+) -> Element {
     let unit = use_unit();
     let errors = use_errors();
     let navigator = use_navigator();
@@ -110,11 +245,6 @@ pub fn SummaryScreen(finished: Finished) -> Element {
         next.ok()
     });
 
-    let Finished {
-        summary,
-        plan,
-        sets,
-    } = finished;
     let duration = duration_text(summary.session.started_at, summary.session.finished_at);
     // The number alone fits a third of the screen; the unit goes in the label.
     let volume = volume_number(summary.volume, unit);
@@ -273,6 +403,35 @@ mod tests {
         assert_eq!(stat_size("1937.5"), 26);
         assert_eq!(stat_size("3500"), 32);
         assert_eq!(stat_size("12345.75"), 22);
+    }
+
+    #[test]
+    fn the_summary_waits_for_its_finish() {
+        let id = iron_oxide_domain::SessionId::from_uuid(Uuid::from_u128(1));
+        let other = iron_oxide_domain::SessionId::from_uuid(Uuid::from_u128(2));
+        assert_eq!(finish_state(id, &[]), FinishState::Delivered);
+        let queued = vec![
+            (
+                WriteKey::SaveSet(SetId::from_uuid(Uuid::from_u128(9))),
+                None,
+            ),
+            (WriteKey::FinishSession(id), None),
+        ];
+        assert_eq!(finish_state(id, &queued), FinishState::Queued);
+        assert_eq!(finish_state(other, &queued), FinishState::Delivered);
+        let start = vec![
+            (WriteKey::StartSession(id), Some("In progress.".to_owned())),
+            (WriteKey::FinishSession(id), None),
+        ];
+        assert_eq!(
+            finish_state(id, &start),
+            FinishState::Refused("In progress.".to_owned())
+        );
+        let refused = vec![(WriteKey::FinishSession(id), Some("Ended.".to_owned()))];
+        assert_eq!(
+            finish_state(id, &refused),
+            FinishState::Refused("Ended.".to_owned())
+        );
     }
 
     #[test]

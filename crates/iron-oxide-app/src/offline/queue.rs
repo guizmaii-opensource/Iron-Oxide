@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::backoff::Backoff;
+use crate::api::sessions::StartChoice;
 
 /// A write the outbox delivers: the exact arguments of one server function in
 /// `crate::api::sessions`. Retries send them unchanged (ids and client timestamps included),
@@ -40,10 +41,14 @@ use super::backoff::Backoff;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Write {
-    /// `start_session(session_id, started_at)`.
+    /// `start_session(session_id, started_at, choice)`.
     StartSession {
         session_id: SessionId,
         started_at: Timestamp,
+        /// The program version and day the device started (absent in queues stored before it
+        /// existed: the server then picks the next day).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        choice: Option<StartChoice>,
     },
     /// `save_set(session_id, set)`.
     SaveSet {
@@ -645,6 +650,7 @@ pub(crate) mod tests {
         Write::StartSession {
             session_id: session,
             started_at: at(1_000),
+            choice: None,
         }
     }
 
@@ -1089,5 +1095,54 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>(),
             vec![start(session), theirs, mine]
         );
+    }
+
+    #[test]
+    fn a_start_stored_before_its_choice_existed_still_loads() {
+        let session = SessionId::new_v7();
+        let stored = serde_json::json!({
+            "kind": "start_session",
+            "session_id": session,
+            "started_at": 1_000,
+        });
+        assert_eq!(
+            serde_json::from_value::<Write>(stored).unwrap(),
+            start(session)
+        );
+        // Without a choice, nothing new is written either.
+        let json = serde_json::to_value(start(session)).unwrap();
+        assert!(json.get("choice").is_none());
+    }
+
+    /// The outbox sends a set exactly as the screen logged it, its prescribed target (#60)
+    /// included, and a stored queue keeps it.
+    #[test]
+    fn a_queued_set_keeps_its_target() {
+        use iron_oxide_domain::Weight;
+        use iron_oxide_domain::progression::{SetGoal, SetTarget};
+        let session = SessionId::new_v7();
+        let Write::SaveSet { set, .. } = set(session, 0) else {
+            unreachable!()
+        };
+        let target = SetTarget {
+            weight: Some(Weight::from_kg(102.5).unwrap()),
+            goal: SetGoal::Reps {
+                reps: Reps::new(5),
+                range: None,
+            },
+        };
+        let write = Write::SaveSet {
+            session_id: session,
+            set: LoggedSet {
+                target: Some(target),
+                ..set
+            },
+        };
+        let mut queue = Queue::default();
+        queue.enqueue(write.clone(), at(3_000));
+        let stored = queue.to_json().unwrap();
+        let (loaded, unreadable) = Queue::from_json(stored);
+        assert!(unreadable.is_empty());
+        assert_eq!(loaded.next_ready(at(3_000)), Some(&write));
     }
 }

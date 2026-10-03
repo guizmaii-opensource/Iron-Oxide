@@ -119,18 +119,34 @@ pub struct SessionSummary {
     pub needs_training_max: Vec<ExerciseId>,
 }
 
-/// Starts a session of the user's active program, on the next day of its rotation.
+/// The program version and day the device started, sent with [`start_session`] so the server
+/// records exactly what the lifter trains (the device may have chosen it offline, before the
+/// previous session's finish reached the server).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartChoice {
+    pub program_id: ProgramId,
+    pub program_version_id: ProgramVersionId,
+    pub day: DayId,
+}
+
+/// Starts a session.
 ///
-/// `session_id` is a new client UUIDv7 and `started_at` the client's clock. Retrying with the same
-/// id and time returns the same session, even after it has ended. `409` when the id was used with
-/// another start time, when another session is still in progress (finish or abandon it first),
-/// or when no program is active.
+/// `session_id` is a new client UUIDv7 and `started_at` the client's clock. With `choice`, the
+/// session is recorded on that program version and day, as long as the version is one of the
+/// user's and belongs to that program (else `409`) and has that day (else `422`); the rotation is
+/// never applied again. Without it (older clients), the active program's latest version, on the
+/// next day of its rotation.
+///
+/// Retrying with the same id and time returns the same session, even after it has ended. `409`
+/// when the id was used with another start time, when another session is still in progress
+/// (finish or abandon it first), or, without `choice`, when no program is active.
 #[post("/api/sessions/start", state: Extension<AppState>, user: AuthUser)]
 pub async fn start_session(
     session_id: SessionId,
     started_at: Timestamp,
+    choice: Option<StartChoice>,
 ) -> Result<SessionView, ServerFnError> {
-    Ok(sessions::start(&state.db, user.owner(), session_id, started_at).await?)
+    Ok(sessions::start(&state.db, user.owner(), session_id, started_at, choice).await?)
 }
 
 /// One of the user's sessions. `404` when it does not exist or is someone else's.

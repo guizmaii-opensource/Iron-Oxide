@@ -4,15 +4,15 @@
 //! The domain [`RestTimer`] stores the instants and what it already announced; the screen only
 //! asks it for the time left at `now`. It re-reads the clock every 250 ms and at once when the page
 //! becomes visible again, so the countdown is right after a lock screen or a tab switch, and an
-//! alert missed meanwhile collapses to the latest one. The timer is kept in `localStorage` so a
-//! reload resumes the rest without announcing anything twice.
+//! alert missed meanwhile collapses to the latest one. The timer is kept in the session record on
+//! the device (`super::local`), so a reload resumes the rest without announcing anything twice.
 
 use std::rc::Rc;
 
 use dioxus::prelude::*;
 use iron_oxide_domain::time::Timestamp;
 use iron_oxide_domain::timer::{ADJUSTMENT_STEP, RestTimer, TimerAlert};
-use iron_oxide_domain::{LoggedSet, Seconds, SessionId, SetId};
+use iron_oxide_domain::{LoggedSet, Seconds, SetId};
 use serde::{Deserialize, Serialize};
 
 use super::flow;
@@ -38,37 +38,19 @@ impl Rest {
     }
 }
 
-/// The `localStorage` key of a session's rest.
-fn key(session: SessionId) -> String {
-    format!("io.session.{}.rest", session.as_uuid())
-}
-
-/// The rest to resume after a reload: the one stored for `session`, if it follows the last logged
-/// set and is not over yet.
+/// The rest to resume after a reload: the one kept in the session record (`super::local`), if it
+/// follows the last logged set and is not over yet.
 #[must_use]
-pub fn restore(session: SessionId, sets: &[LoggedSet<Timestamp>], now: Timestamp) -> Option<Rest> {
-    let rest: Rest = serde_json::from_str(&platform::load(&key(session))?).ok()?;
+pub fn resume(rest: Option<Rest>, sets: &[LoggedSet<Timestamp>], now: Timestamp) -> Option<Rest> {
+    let rest = rest?;
     let last = sets.last()?;
     (last.id == rest.after && !rest.timer.is_finished(now)).then_some(rest)
 }
 
-/// Keeps `rest` for a reload.
-pub fn store(session: SessionId, rest: &Rest) {
-    if let Ok(json) = serde_json::to_string(rest) {
-        platform::store(&key(session), &json);
-    }
-}
-
-/// Forgets the session's rest (skipped, over, or the session ended).
-pub fn clear(session: SessionId) {
-    platform::remove(&key(session));
-}
-
 /// The rest screen. `rest` is the workout's rest: this screen counts it down, adjusts it, and
-/// clears it when the lifter moves on.
+/// clears it when the lifter moves on; the workout keeps it in the session record.
 #[component]
 pub fn RestScreen(
-    session: SessionId,
     rest: Signal<Option<Rest>>,
     title: String,
     logged: String,
@@ -98,7 +80,6 @@ pub fn RestScreen(
             alert.set(Some(fired));
         }
         if observed != current {
-            store(session, &observed);
             rest.set(Some(observed));
         }
     };
@@ -125,7 +106,6 @@ pub fn RestScreen(
         if let Some(mut adjusted) = current {
             let at = platform::now();
             change(&mut adjusted.timer, at);
-            store(session, &adjusted);
             rest.set(Some(adjusted));
             now.set(at);
             alert.set(None);
@@ -133,7 +113,6 @@ pub fn RestScreen(
     };
     let mut done = move || {
         platform::unlock_audio();
-        clear(session);
         rest.set(None);
     };
     let message = match alert() {
